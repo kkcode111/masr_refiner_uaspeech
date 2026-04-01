@@ -1,3 +1,4 @@
+#原来conformer.yml的副本
 # 编码器
 encoder_conf:
   # 使用的编码器
@@ -45,8 +46,6 @@ model_conf:
     lsm_weight: 0.1
     reverse_weight: 0.3
     length_normalized_loss: false
-    # 是否使用nar
-    if_use_nar: True
 
 # 数据集参数
 dataset_conf:
@@ -90,13 +89,11 @@ preprocess_conf:
 # Token处理方法参数
 tokenizer_conf:
   # 词汇模型文件夹路径
-  vocab_model_dir: "Comformer_Librispeech/dataset/vocab_model/"
+  vocab_model_dir: "dataset/vocab_model/"
   # 构建词汇表的字符类型，支持：char、word、unigram
   model_type: 'unigram'
   # 构建词汇表的大小，当model_type为char、word时，为null会使用全部词汇
   build_vocab_size: 5000
-  hard_vocab_limit: False
-  byte_fallback: True
   # 非语言符号列表
   non_linguistic_symbols: [ ]
   # 是否移除非语言符号
@@ -108,7 +105,7 @@ optimizer_conf:
   optimizer: 'Adam'
   # 优化方法参数
   optimizer_args:
-    lr: 0.0001
+    lr: 0.001
     weight_decay: !!float 1.e-6
   # 学习率衰减函数，支持Pytorch支持的和项目提供的额外方法
   scheduler: 'WarmupLR'
@@ -130,7 +127,6 @@ train_conf:
   # 梯度累加，变相扩大batch_size的作用
   accum_grad: 4
   # 训练的轮数
-  max_epoch: 60
-  freeze_decoder_epochs: 40
+  max_epoch: 200
   # 多少batch打印一次日志
-  log_interval: 10000
+  log_interval: 100

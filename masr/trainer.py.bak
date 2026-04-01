@@ -53,7 +53,7 @@ class MASRTrainer(object):
         :type use_gpu: bool
         :param metrics_type: 评估指标类型，中文用cer，英文用wer，中英混合用mer
         :type metrics_type: str
-        :param decoder: 解码器，支持ctc_greedy_search、ctc_prefix_beam_search、attention_rescoring、ctc_beam_search
+        :param decoder: 解码器，支持ctc_greedy、ctc_beam_search
         :type decoder: str
         :param decoder_configs: 解码器配置参数文件路径，支持yaml格式
         :type decoder_configs: dict or str
@@ -136,7 +136,6 @@ class MASRTrainer(object):
         self.eval_loss, self.eval_error_result = None, None
         self.test_log_step, self.train_log_step = 0, 0
         self.stop_train, self.stop_eval = False, False
-        self._decoder_frozen_state = None
 
     def __setup_dataloader(self, is_train=False, max_text_duration=None):
         """ 获取数据加载器
@@ -356,9 +355,6 @@ class MASRTrainer(object):
             model_context = nullcontext
         train_times, reader_times, batch_times, loss_sum = [], [], [], []
         start = time.time()
-        enable_amp = self.configs.train_conf.enable_amp
-        if isinstance(enable_amp, str):
-            enable_amp = enable_amp.lower() == 'true'
         with model_context():
             for batch_id, batch in enumerate(self.train_loader):
                 if self.stop_train: break
@@ -373,7 +369,7 @@ class MASRTrainer(object):
                 if num_utts == 0:
                     continue
                 # 执行模型计算，是否开启自动混合精度
-                with torch.autocast('cuda', enabled=enable_amp):
+                with torch.autocast('cuda', enabled=self.configs.train_conf.enable_amp):
                     loss_dict = self.model(inputs, input_lens, labels, label_lens)
                 if torch.cuda.device_count() > 1 and batch_id % accum_grad != 0:
                     context = self.model.no_sync
@@ -382,7 +378,7 @@ class MASRTrainer(object):
                 with context():
                     loss = loss_dict['loss'] / accum_grad
                     # 是否开启自动混合精度
-                    if enable_amp:
+                    if self.configs.train_conf.enable_amp:
                         # loss缩放，乘以系数loss_scaling
                         scaled = self.amp_scaler.scale(loss)
                         scaled.backward()
@@ -391,7 +387,7 @@ class MASRTrainer(object):
                 # 执行一次梯度计算
                 if batch_id % accum_grad == 0:
                     # 是否开启自动混合精度
-                    if enable_amp:
+                    if self.configs.train_conf.enable_amp:
                         self.amp_scaler.unscale_(self.optimizer)
                         self.amp_scaler.step(self.optimizer)
                         self.amp_scaler.update()
@@ -554,16 +550,13 @@ class MASRTrainer(object):
             writer.add_scalar('Train/lr', self.scheduler.get_last_lr()[0], last_epoch)
         if max_epoch is not None:
             self.configs.train_conf.max_epoch = max_epoch
-        self._maybe_update_decoder_freeze(last_epoch + 1)
         # 最大步数
         self.max_step = len(self.train_loader) * self.configs.train_conf.max_epoch
         self.train_step = max(last_epoch, 0) * len(self.train_loader)
         # 开始训练
-        logger.info(self.model)
         for epoch_id in range(last_epoch, self.configs.train_conf.max_epoch):
             if self.stop_train: break
             epoch_id += 1
-            self._maybe_update_decoder_freeze(epoch_id)
             start_epoch = time.time()
             # 训练一个epoch
             self.__train_epoch(epoch_id=epoch_id, save_model_path=save_model_path, writer=writer)
@@ -744,29 +737,3 @@ class MASRTrainer(object):
                 inference_config['symbols'] = {'sos': self.model.sos_symbol(), 'eos': self.model.eos_symbol(),
                                                'ignore_id': self.model.ignore_symbol()}
             json.dump(inference_config, f, indent=4, ensure_ascii=False)
-
-    def _set_decoder_requires_grad(self, requires_grad: bool):
-        m = self.model.module if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) else self.model
-        if not hasattr(m, 'decoder'):
-            return
-        for p in m.decoder.parameters():
-            p.requires_grad = requires_grad
-
-    def _maybe_update_decoder_freeze(self, epoch_id: int):
-        freeze_epochs = getattr(self.configs.train_conf, 'freeze_decoder_epochs', None)
-        desired = None
-        if isinstance(freeze_epochs, int) and freeze_epochs > 0:
-            desired = epoch_id <= freeze_epochs
-        if desired is None:
-            return
-        if self._decoder_frozen_state is None or self._decoder_frozen_state != desired:
-            self._set_decoder_requires_grad(not desired)
-            self._decoder_frozen_state = desired
-            if self.local_rank == 0:
-                if desired:
-                    logger.info(f'已冻结解码器参数，当前epoch：{epoch_id}/{self.configs.train_conf.max_epoch}')
-                else:
-                    logger.info(f'已解冻解码器参数，当前epoch：{epoch_id}/{self.configs.train_conf.max_epoch}')
-    # def freeze_layers(self, layer_ids: List[int]):
-    #     for layer_id in layer_ids:
-    #         self.model.decoder.layers[layer_id].freeze()

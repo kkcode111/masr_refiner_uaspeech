@@ -74,21 +74,6 @@ def load_checkpoint(configs, model, optimizer, amp_scaler, scheduler,
     last_epoch1 = 0
     error_rate1 = 1.0
 
-    def load_model_state_error_rate(model_path):
-        state_path = os.path.join(model_path, 'model.state')
-        if not os.path.exists(state_path):
-            return None
-        with open(state_path, 'r', encoding='utf-8') as f:
-            json_data = json.load(f)
-        error_rate = None
-        if 'cer' in json_data:
-            error_rate = abs(json_data['cer'])
-        if 'wer' in json_data:
-            error_rate = abs(json_data['wer'])
-        if 'mer' in json_data:
-            error_rate = abs(json_data['mer'])
-        return error_rate
-
     def load_model(model_path):
         assert os.path.exists(os.path.join(model_path, 'model.pth')), "模型参数文件不存在！"
         assert os.path.exists(os.path.join(model_path, 'optimizer.pth')), "优化方法参数文件不存在！"
@@ -121,9 +106,6 @@ def load_checkpoint(configs, model, optimizer, amp_scaler, scheduler,
     last_model_dir = os.path.join(save_model_path,
                                   f'{configs.model_conf.model}_{save_feature_method}',
                                   'last_model')
-    best_model_dir = os.path.join(save_model_path,
-                                  f'{configs.model_conf.model}_{save_feature_method}',
-                                  'best_model')
     if resume_model is not None or (os.path.exists(os.path.join(last_model_dir, 'model.pth'))
                                     and os.path.exists(os.path.join(last_model_dir, 'optimizer.pth'))):
         if resume_model is not None:
@@ -134,9 +116,6 @@ def load_checkpoint(configs, model, optimizer, amp_scaler, scheduler,
                 last_epoch1, error_rate1 = load_model(last_model_dir)
             except Exception as e:
                 logger.warning(f'尝试自动恢复最新模型失败，错误信息：{e}')
-    best_error_rate = load_model_state_error_rate(best_model_dir)
-    if best_error_rate is not None:
-        error_rate1 = min(error_rate1, best_error_rate)
     return model, optimizer, amp_scaler, scheduler, last_epoch1, error_rate1
 
 
