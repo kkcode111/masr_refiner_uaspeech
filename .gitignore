@@ -6,7 +6,7 @@ __pycache__/
 
 # Datasets
 librispeech/
-dataset/audio/UASpeech/
+dataset/audio/
 
 # Models and results
 uaspeechmodel/

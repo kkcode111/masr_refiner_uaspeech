@@ -12,12 +12,12 @@ add_arg('data_augment_configs', str,    'configs/augmentation.yml', '数据增�
 add_arg("local_rank",           int,    0,                          '多卡训练的本地GPU')
 add_arg("use_gpu",              bool,   True,                       '是否使用GPU训练')
 add_arg('metrics_type',         str,    'wer',                      '评估指标类型，中文用cer，英文用wer，中英混合用mer')
-add_arg('save_model_path',      str,    'uaspeechmodel/baseline_v1/','模型保存的路径')
-add_arg('log_dir',              str,    'uaspeechmodel/logs/baseline_v1/', '保存VisualDL日志文件的路径')
+add_arg('save_model_path',      str,    'uaspeechmodel/refiner_v9/','模型保存的路径')
+add_arg('log_dir',              str,    'uaspeechmodel/logs/refiner_v9/', '保存VisualDL日志文件的路径')
 add_arg('resume_model',         str,    None,                       '恢复训练，当为None则不使用预训练模型')
-add_arg('pretrained_model',     str,    '/root/autodl-tmp/MASR/Comformer_Librispeech/models/ConformerModel_fbank/best_model/','预训练模型的路径，当为None则不使用预训练模型')
-add_arg('overwrites',           str,    f"train_conf.max_epoch=60",  '覆盖配置文件中的参数，比如"train_conf.max_epoch=100"，多个用逗号隔开')
-add_arg('freeze_decoder_epochs',int,    40,      '冻结decoder的epoch数量，设置为0表示不冻结')
+add_arg('pretrained_model',     str,    '/home/jb608/xry/masr_refiner_uaspeech/pretrain_models/refiner_pretrain_v1/ConformerModel_fbank/best_model','预训练模型的路径，当为None则不使用预训练模型')
+add_arg('overwrites',           str,    f"train_conf.max_epoch=20",  '覆盖配置文件中的参数，比如"train_conf.max_epoch=100"，多个用逗号隔开')
+add_arg('freeze_decoder_epochs',int,   12,      '冻结decoder的epoch数量，设置为0表示不冻结')
 args = parser.parse_args()
 
 if int(os.environ.get('LOCAL_RANK', 0)) == 0:

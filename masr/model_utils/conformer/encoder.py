@@ -15,6 +15,8 @@ from masr.model_utils.conformer.subsampling import Conv2dSubsampling4
 from masr.model_utils.conformer.subsampling import Conv2dSubsampling6
 from masr.model_utils.conformer.subsampling import Conv2dSubsampling8
 from masr.model_utils.conformer.subsampling import LinearNoSubsampling
+from masr.model_utils.conformer.subsampling import ParallelSpectralBranching4
+from masr.model_utils.conformer.subsampling import GlobalParallelSpectralBranching
 from masr.model_utils.utils.common import get_activation
 from masr.model_utils.utils.mask import add_optional_chunk_mask, make_pad_mask
 
@@ -49,7 +51,9 @@ class ConformerEncoder(nn.Module):
             cnn_module_kernel: int = 15,
             causal: bool = False,
             cnn_module_norm: str = "layer_norm",
-            max_len: int = 5000
+            max_len: int = 5000,
+            gpsb_branch_channels: Optional[int] = None,
+            gpsb_alpha_init: float = 0.0
     ):
         """Construct ConformerEncoder
 
@@ -111,18 +115,32 @@ class ConformerEncoder(nn.Module):
             subsampling_class = Conv2dSubsampling6
         elif input_layer == "conv2d8":
             subsampling_class = Conv2dSubsampling8
+        elif input_layer == "psb4":
+            subsampling_class = ParallelSpectralBranching4
+        elif input_layer == "gpsb":
+            subsampling_class = GlobalParallelSpectralBranching
         else:
             raise ValueError("unknown input_layer: " + input_layer)
 
         self.global_cmvn = global_cmvn
-        self.embed = subsampling_class(
-            idim=input_size,
-            odim=output_size,
-            dropout_rate=dropout_rate,
-            pos_enc_class=pos_enc_class(
-                d_model=output_size,
-                dropout_rate=positional_dropout_rate,
-                max_len=max_len), )
+        pos_enc = pos_enc_class(
+            d_model=output_size,
+            dropout_rate=positional_dropout_rate,
+            max_len=max_len)
+        if input_layer == "gpsb":
+            self.embed = subsampling_class(
+                idim=input_size,
+                odim=output_size,
+                dropout_rate=dropout_rate,
+                pos_enc_class=pos_enc,
+                branch_channels=gpsb_branch_channels,
+                alpha_init=gpsb_alpha_init)
+        else:
+            self.embed = subsampling_class(
+                idim=input_size,
+                odim=output_size,
+                dropout_rate=dropout_rate,
+                pos_enc_class=pos_enc)
 
         self.normalize_before = normalize_before
         self.after_norm = torch.nn.LayerNorm(output_size, eps=1e-5)

@@ -99,6 +99,11 @@ class MASRDataset(Dataset):
                     audio_segment = AudioSegment.slice_from_file(audio_file, start=start_time, end=end_time)
                 # 音频增强
                 if self.mode == 'train':
+                    # 如果有指定的语速，则先进行语速增强
+                    if 'speed_rate' in data_list.keys():
+                        speed_rate = data_list['speed_rate']
+                        if speed_rate != 1.0:
+                            audio_segment.change_speed(speed_rate)
                     audio_segment = self.augment_audio(audio_segment)
                 # 重采样
                 if audio_segment.sample_rate != self._target_sample_rate:

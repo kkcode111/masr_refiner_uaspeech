@@ -8,13 +8,13 @@ ctc_prefix_beam_search_args:
 # 解码器参数
 attention_rescoring_args:
   # 解码搜索大小
-  beam_size: 10
+  beam_size: 20
   # 多线程解码数量
   num_workers: 4
   # CTC解码器权重
-  ctc_weight: 0.3
+  ctc_weight: 0.2
   # 反向解码器权重
-  reverse_weight: 1.0
+  reverse_weight: 0.0
 
 # 解码器参数
 ctc_beam_search_args:

@@ -94,10 +94,19 @@ def load_checkpoint(configs, model, optimizer, amp_scaler, scheduler,
         assert os.path.exists(os.path.join(model_path, 'optimizer.pth')), "优化方法参数文件不存在！"
         state_dict = torch.load(os.path.join(model_path, 'model.pth'), weights_only=False)
         if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-            model.module.load_state_dict(state_dict)
+            missing_keys, unexpected_keys = model.module.load_state_dict(state_dict, strict=False) # 修改原因：支持模型结构变更后的非严格加载
         else:
-            model.load_state_dict(state_dict)
-        optimizer.load_state_dict(torch.load(os.path.join(model_path, 'optimizer.pth'), weights_only=False))
+            missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False) # 修改原因：支持模型结构变更后的非严格加载
+        
+        if len(unexpected_keys) > 0:
+            logger.warning('恢复模型时发现冗余键（将被忽略）: {}'.format(unexpected_keys))
+        if len(missing_keys) > 0:
+            logger.warning('恢复模型时发现缺失键（将随机初始化）: {}'.format(missing_keys))
+
+        try:
+            optimizer.load_state_dict(torch.load(os.path.join(model_path, 'optimizer.pth'), weights_only=False))
+        except Exception as e:
+            logger.warning(f'优化器状态加载失败（可能因结构变更），将使用初始优化器: {e}')
         # 自动混合精度参数
         if amp_scaler is not None and os.path.exists(os.path.join(model_path, 'scaler.pth')):
             amp_scaler.load_state_dict(torch.load(os.path.join(model_path, 'scaler.pth'), weights_only=False))

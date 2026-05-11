@@ -171,7 +171,7 @@ class ConformerModel(torch.nn.Module):
         # 1. Forward decoder
         left_decoder_hidden = None
         if self.nar is not None:
-            decoder_out, r_decoder_out, _, left_decoder_hidden = self.decoder(
+            decoder_outputs = self.decoder(
                 encoder_out,
                 encoder_mask,
                 ys_in_pad,
@@ -180,6 +180,9 @@ class ConformerModel(torch.nn.Module):
                 self.reverse_weight,
                 return_hidden=True,
             )
+            decoder_out = decoder_outputs[0]
+            r_decoder_out = decoder_outputs[1]
+            left_decoder_hidden = decoder_outputs[3]
         else:
             decoder_out, r_decoder_out, _ = self.decoder(
                 encoder_out, encoder_mask, ys_in_pad, ys_in_lens, r_ys_in_pad, self.reverse_weight)
@@ -293,7 +296,7 @@ class ConformerModel(torch.nn.Module):
             hyps_lens: torch.Tensor,
             encoder_out: torch.Tensor,
             reverse_weight: float = 0,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """ Export interface for c++ call, forward decoder with multiple
             hypothesis from ctc prefix beam search and one encoder output
         Args:
@@ -308,20 +311,22 @@ class ConformerModel(torch.nn.Module):
 
         Returns:
             torch.Tensor: decoder output
+            torch.Tensor: reverse decoder output
+            torch.Tensor: refiner output
         """
         assert encoder_out.size(0) == 1
         num_hyps = hyps.size(0)
         assert hyps_lens.size(0) == num_hyps
-        encoder_out = encoder_out.repeat(num_hyps, 1, 1)
+        encoder_out_repeat = encoder_out.repeat(num_hyps, 1, 1)
         encoder_mask = torch.ones(num_hyps,
                                   1,
-                                  encoder_out.size(1),
+                                  encoder_out_repeat.size(1),
                                   dtype=torch.bool,
-                                  device=encoder_out.device)
+                                  device=encoder_out_repeat.device)
         r_hyps_lens = hyps_lens - 1
         r_hyps = hyps[:, 1:]
         max_len = torch.max(r_hyps_lens)
-        index_range = torch.arange(0, max_len, 1).to(encoder_out.device)
+        index_range = torch.arange(0, max_len, 1).to(encoder_out_repeat.device)
         seq_len_expand = r_hyps_lens.unsqueeze(1)
         seq_mask = seq_len_expand > index_range  # (beam, max_len)
         index = (seq_len_expand - 1) - index_range  # (beam, max_len)
@@ -329,11 +334,41 @@ class ConformerModel(torch.nn.Module):
         r_hyps = torch.gather(r_hyps, 1, index)
         r_hyps = torch.where(seq_mask, r_hyps, self.eos)
         r_hyps = torch.cat([hyps[:, 0:1], r_hyps], dim=1)
-        decoder_out, r_decoder_out, _ = self.decoder(encoder_out, encoder_mask, hyps, hyps_lens, r_hyps,
-                                                     reverse_weight)  # (num_hyps, max_hyps_len, vocab_size)
+        
+        # 万能解包：不再死板要求 5 个值，通过索引获取，兼容性更强
+        decoder_outputs = self.decoder(
+            encoder_out_repeat, encoder_mask, hyps, hyps_lens, r_hyps,
+            reverse_weight, return_hidden=True)
+        
+        decoder_out = decoder_outputs[0]
+        r_decoder_out = decoder_outputs[1]
+        # olens = decoder_outputs[2]
+        left_hidden = decoder_outputs[3] # 无论 4 个还是 5 个值，第 4 个始终是 left_hidden
+
+        # 计算 Refiner 输出
+        refiner_out = torch.zeros(num_hyps, hyps.size(1) - 1, self.vocab_size, device=decoder_out.device)
+        if self.nar is not None:
+            # 去掉 <sos> 位置，对齐文本长度
+            # left_hidden: [B, L+1, D] -> [B, L, D]
+            U = hyps.size(1) - 1
+            hidden_text = left_hidden[:, 1:U + 1, :]
+            # 为了调用 nar.decode，需要准备真实的 hyps_lens (去掉 sos)
+            real_hyps_lens = hyps_lens - 1
+            
+            # 由于 get_decoder_out 是针对 beam_size 的，这里 encoder_out 已经是 repeat 后的了
+            # 我们需要把原始的 encoder_mask 传给 Refiner
+            _, refiner_logits = self.nar.decode(
+                hidden=hidden_text,
+                lengths=real_hyps_lens,
+                encoder_out=encoder_out_repeat,
+                encoder_mask=encoder_mask
+            )
+            # 对 logits 进行 log_softmax
+            refiner_out = torch.nn.functional.log_softmax(refiner_logits, dim=-1)
+
         decoder_out = torch.nn.functional.log_softmax(decoder_out, dim=-1)
         r_decoder_out = torch.nn.functional.log_softmax(r_decoder_out, dim=-1)
-        return decoder_out, r_decoder_out
+        return decoder_out, r_decoder_out, refiner_out
 
     @torch.no_grad()
     def export(self):

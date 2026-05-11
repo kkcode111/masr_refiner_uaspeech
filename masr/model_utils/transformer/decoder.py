@@ -94,15 +94,28 @@ class BiTransformerDecoder(nn.Module):
                 olens: (batch, )
         """
         if return_hidden:
-            l_x, _, olens, left_decoder_hidden = self.left_decoder(
+            left_outputs = self.left_decoder(
                 memory, memory_mask, ys_in_pad, ys_in_lens, return_hidden=True)
+            l_x = left_outputs[0]
+            olens = left_outputs[2]
+            left_decoder_hidden = left_outputs[3]
         else:
             l_x, _, olens = self.left_decoder(memory, memory_mask, ys_in_pad, ys_in_lens)
+        
         r_x = torch.zeros([1])
+        right_decoder_hidden = None
         if reverse_weight > 0.0:
-            r_x, _, olens = self.right_decoder(memory, memory_mask, r_ys_in_pad, ys_in_lens)
+            if return_hidden:
+                right_outputs = self.right_decoder(
+                    memory, memory_mask, r_ys_in_pad, ys_in_lens, return_hidden=True)
+                r_x = right_outputs[0]
+                olens = right_outputs[2]
+                right_decoder_hidden = right_outputs[3]
+            else:
+                r_x, _, olens = self.right_decoder(memory, memory_mask, r_ys_in_pad, ys_in_lens)
+        
         if return_hidden:
-            return l_x, r_x, olens, left_decoder_hidden
+            return l_x, r_x, olens, left_decoder_hidden, right_decoder_hidden
         return l_x, r_x, olens
 
     def forward_one_step(
@@ -242,8 +255,9 @@ class TransformerDecoder(nn.Module):
 
         olens = tgt_mask.sum(1)
         if return_hidden:
-            return x, torch.tensor(0.0), olens, hidden
-        return x, torch.tensor(0.0), olens
+            # 修改：返回 5 个值以保持与 BiTransformerDecoder 接口统一
+            return x, torch.tensor(0.0, device=x.device), olens, hidden, None
+        return x, torch.tensor(0.0, device=x.device), olens
 
     def forward_one_step(
             self,

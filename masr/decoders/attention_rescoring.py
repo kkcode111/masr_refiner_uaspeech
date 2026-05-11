@@ -61,7 +61,7 @@ def attention_rescoring(
 
         # ctc score in ln domain
         # (beam_size, max_hyps_len, vocab_size)
-        decoder_out, r_decoder_out = model.get_decoder_out(hyps_pad, hyps_lens, encoder_out, reverse_weight)
+        decoder_out, r_decoder_out, refiner_out = model.get_decoder_out(hyps_pad, hyps_lens, encoder_out, reverse_weight)
 
         # Only use decoder score for rescoring
         best_score = -float('inf')
@@ -70,15 +70,28 @@ def attention_rescoring(
         for i, hyp in enumerate(hyps):
             score = 0.0
             for j, w in enumerate(hyp[0]):
-                score += decoder_out[i][j][w]
+                # 融合 Left Decoder 分数
+                l_score = decoder_out[i][j][w]
+                
+                # 融合 Refiner 分数 (权重 0.1)
+                ref_score = 0.0
+                if refiner_out.dim() > 1:
+                    ref_score = refiner_out[i][j][w]
+                
+                # 当前位置的总分
+                score += (1 - 0.1) * l_score + 0.1 * ref_score
+                
             # last decoder output token is `eos`, for laste decoder input token.
             score += decoder_out[i][len(hyp[0])][eos]
+            
             if reverse_weight > 0:
                 r_score = 0.0
                 for j, w in enumerate(hyp[0]):
                     r_score += r_decoder_out[i][len(hyp[0]) - j - 1][w]
                 r_score += r_decoder_out[i][len(hyp[0])][eos]
+                # 这里的 reverse_weight 决定了 Right Decoder 在总分中的占比
                 score = score * (1 - reverse_weight) + r_score * reverse_weight
+            
             # add ctc score (which in ln domain)
             score += hyp[1] * ctc_weight
             if score > best_score:
