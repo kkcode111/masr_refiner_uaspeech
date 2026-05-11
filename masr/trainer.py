@@ -137,6 +137,7 @@ class MASRTrainer(object):
         self.test_log_step, self.train_log_step = 0, 0
         self.stop_train, self.stop_eval = False, False
         self._decoder_frozen_state = None
+        self._encoder_frozen_state = None
 
     def __setup_dataloader(self, is_train=False, max_text_duration=None):
         """ 获取数据加载器
@@ -554,15 +555,25 @@ class MASRTrainer(object):
             writer.add_scalar('Train/lr', self.scheduler.get_last_lr()[0], last_epoch)
         if max_epoch is not None:
             self.configs.train_conf.max_epoch = max_epoch
+        self._maybe_update_encoder_freeze(last_epoch + 1)
         self._maybe_update_decoder_freeze(last_epoch + 1)
         # 最大步数
         self.max_step = len(self.train_loader) * self.configs.train_conf.max_epoch
         self.train_step = max(last_epoch, 0) * len(self.train_loader)
         # 开始训练
         logger.info(self.model)
+        # 如果是恢复训练，先评估一次，确保用户能看到当前加载模型的性能
+        if last_epoch > 0 and self.local_rank == 0:
+            logger.info('=' * 70)
+            logger.info(f'正在对恢复的模型 (Epoch {last_epoch}) 进行初始评估...')
+            self.eval_loss, self.eval_error_result = self.evaluate()
+            logger.info(f'初始评估结果: loss: {self.eval_loss:.5f}, {self.metrics_type}: {self.eval_error_result:.5f}')
+            logger.info('=' * 70)
+
         for epoch_id in range(last_epoch, self.configs.train_conf.max_epoch):
             if self.stop_train: break
             epoch_id += 1
+            self._maybe_update_encoder_freeze(epoch_id)
             self._maybe_update_decoder_freeze(epoch_id)
             start_epoch = time.time()
             # 训练一个epoch
@@ -752,6 +763,17 @@ class MASRTrainer(object):
         for p in m.decoder.parameters():
             p.requires_grad = requires_grad
 
+    def _set_encoder_requires_grad(self, requires_grad: bool, keep_embed_trainable: bool = True):
+        m = self.model.module if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) else self.model
+        if not hasattr(m, 'encoder'):
+            return
+        for p in m.encoder.parameters():
+            p.requires_grad = requires_grad
+        # 冻结encoder主体时保留前端可训练，便于GPSB先对齐特征分布
+        if (not requires_grad) and keep_embed_trainable and hasattr(m.encoder, 'embed'):
+            for p in m.encoder.embed.parameters():
+                p.requires_grad = True
+
     def _maybe_update_decoder_freeze(self, epoch_id: int):
         freeze_epochs = getattr(self.configs.train_conf, 'freeze_decoder_epochs', None)
         desired = None
@@ -767,6 +789,24 @@ class MASRTrainer(object):
                     logger.info(f'已冻结解码器参数，当前epoch：{epoch_id}/{self.configs.train_conf.max_epoch}')
                 else:
                     logger.info(f'已解冻解码器参数，当前epoch：{epoch_id}/{self.configs.train_conf.max_epoch}')
+
+    def _maybe_update_encoder_freeze(self, epoch_id: int):
+        freeze_epochs = getattr(self.configs.train_conf, 'freeze_encoder_epochs', None)
+        keep_embed_trainable = getattr(self.configs.train_conf, 'freeze_encoder_keep_embed', True)
+        desired = None
+        if isinstance(freeze_epochs, int) and freeze_epochs > 0:
+            desired = epoch_id <= freeze_epochs
+        if desired is None:
+            return
+        if self._encoder_frozen_state is None or self._encoder_frozen_state != desired:
+            self._set_encoder_requires_grad(not desired, keep_embed_trainable=keep_embed_trainable)
+            self._encoder_frozen_state = desired
+            if self.local_rank == 0:
+                if desired:
+                    suffix = "（保留前端可训练）" if keep_embed_trainable else ""
+                    logger.info(f'已冻结编码器参数{suffix}，当前epoch：{epoch_id}/{self.configs.train_conf.max_epoch}')
+                else:
+                    logger.info(f'已解冻编码器参数，当前epoch：{epoch_id}/{self.configs.train_conf.max_epoch}')
     # def freeze_layers(self, layer_ids: List[int]):
     #     for layer_id in layer_ids:
     #         self.model.decoder.layers[layer_id].freeze()
