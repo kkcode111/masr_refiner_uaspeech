@@ -135,8 +135,8 @@ train_conf:
   # 梯度累加，变相扩大batch_size的作用
   accum_grad: 4
   # 训练的轮数
-  max_epoch: 15
-  freeze_decoder_epochs: 8
+  max_epoch: 40
+  freeze_decoder_epochs: 20
   # 冻结编码器轮数（用于GPSB预对齐）
   freeze_encoder_epochs: 6
   # 冻结编码器时是否保持前端(embed/GPSB)可训练
