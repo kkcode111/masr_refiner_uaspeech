@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Tuple
 
 
 class AcousticPreprocessor(nn.Module):
@@ -74,6 +73,11 @@ class AcousticPreprocessor(nn.Module):
         """
         key_padding_mask = self._convert_encoder_mask(encoder_mask)
 
+        # 修改原因：防御性检查，防止全掩码导致 MultiheadAttention 产生 NaN # 修改原因：安全性增强
+        if key_padding_mask is not None and torch.all(key_padding_mask, dim=-1).any():
+            bad_indices = torch.all(key_padding_mask, dim=-1)
+            key_padding_mask[bad_indices, 0] = False
+
         h = self.hidden_norm(hidden)
         e = self.encoder_norm(encoder_out)
 
@@ -96,12 +100,14 @@ class AcousticPreprocessor(nn.Module):
 
 class NonCausalRefiner(nn.Module):
     """
-    非因果纠错 Refiner（去掉 MLM 版本）
+    非因果 Refiner：输入 Decoder 的 hidden 状态，输出修正后的文本。
+    V5 优化版：支持门控融合、灵活层数配置。
+
     输入:
-        hidden: [B, L, 512]    (来自 Wenet decoder hidden，已去掉<sos>)
+        hidden: [B, L, 512] (左向+右向 hidden 拼接)
         target: [B, L]
-        lengths:[B]
-        predict:[B, L]         (原始 decoder / rescoring 的预测结果)
+        lengths: [B]
+        predict: [B, L]
         encoder_out: [B, T, 512] 可选
         encoder_mask:[B,1,T] 或 [B,T] 可选
 
@@ -114,19 +120,16 @@ class NonCausalRefiner(nn.Module):
     def __init__(
         self,
         vocab_size: int,
-        input_dim: int = 256,
+        input_dim: int = 512, # 修改原因：明确适配 V5 的双向拼接维度
         hidden_dim: int = 256,
-        num_layers: int = 2,
+        num_layers: int = 2, # 修改原因：回滚至 2 层以提升稳定性，避免对小数据集过拟合
         num_heads: int = 4,
         ffn_dim: int = 1024,
         dropout: float = 0.1,
         error_weight: float = 2.0,
         use_acoustic_preprocess: bool = True,
         acoustic_heads: int = 4,
-        enable_span_mlm: bool = False,
-        span_max_len: int = 3,
-        span_max_ratio: float = 0.15,
-        span_min_error_tokens: int = 1,
+        fusion_type: str = "gate", # 修改原因：引入门控融合，自动筛选左右向有效信息
     ):
         super().__init__()
 
@@ -135,13 +138,18 @@ class NonCausalRefiner(nn.Module):
         self.hidden_dim = hidden_dim
         self.error_weight = error_weight
         self.use_acoustic_preprocess = use_acoustic_preprocess
-        self.enable_span_mlm = enable_span_mlm
-        self.span_max_len = span_max_len
-        self.span_max_ratio = span_max_ratio
-        self.span_min_error_tokens = span_min_error_tokens
+        self.fusion_type = fusion_type
 
-        # 输入投影
-        self.input_proj = nn.Linear(input_dim, hidden_dim)
+        # 融合层
+        if fusion_type == "gate":
+            self.gate_linear = nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.Sigmoid()
+            )
+            self.fusion_proj = nn.Linear(input_dim, hidden_dim)
+        else:
+            # 默认使用 Linear 投影 (兼容原有 Concat 逻辑)
+            self.input_proj = nn.Linear(input_dim, hidden_dim)
 
         # 用于错误位置替换的可学习 mask 向量
         self.mask_embed = nn.Parameter(torch.zeros(hidden_dim))
@@ -165,6 +173,7 @@ class NonCausalRefiner(nn.Module):
             activation="gelu",
             batch_first=True,
             norm_first=True,
+            layer_norm_eps=1e-5
         )
         self.refiner = nn.TransformerEncoder(
             encoder_layer,
@@ -175,97 +184,30 @@ class NonCausalRefiner(nn.Module):
         self.output_layer = nn.Linear(hidden_dim, vocab_size)
 
     def _build_padding_mask(self, lengths: torch.Tensor, max_len: int):
-        """
-        返回 [B, L], True 表示 padding
-        """
         device = lengths.device
         seq_range = torch.arange(max_len, device=device).unsqueeze(0)
         return seq_range >= lengths.unsqueeze(1)
 
     def _prepare_hidden(self, hidden, encoder_out=None, encoder_mask=None):
-        """
-        预处理 hidden，并可选融合 encoder_out 的声学信息
-        """
         hidden = hidden.float()
-        x = self.input_proj(hidden)
+        
+        if self.fusion_type == "gate":
+            # hidden 是 [B, L, 512]，假设前 256 是 left，后 256 是 right
+            gate = self.gate_linear(hidden)
+            x = self.fusion_proj(hidden) * gate # 修改原因：通过门控动态决定左右向信息的融合权重
+        else:
+            x = self.input_proj(hidden)
 
         if self.use_acoustic_preprocess and encoder_out is not None:
             x = self.acoustic_preprocessor(x, encoder_out.float(), encoder_mask)
 
         return x
 
-    def _extract_contiguous_spans(self, mask_1d: torch.Tensor) -> List[Tuple[int, int]]:
-        idx = torch.nonzero(mask_1d, as_tuple=False).squeeze(1)
-        if idx.numel() == 0:
-            return []
-        if idx.numel() == 1:
-            pos = int(idx.item())
-            return [(pos, pos)]
-        diff = idx[1:] - idx[:-1]
-        breaks = torch.nonzero(diff > 1, as_tuple=False).squeeze(1)
-        starts = torch.cat([idx[:1], idx[breaks + 1]])
-        ends = torch.cat([idx[breaks], idx[-1:]])
-        return [(int(s.item()), int(e.item())) for s, e in zip(starts, ends)]
-
-    def _build_span_mask(
-        self,
-        error_mask: torch.Tensor,
-        padding_mask: torch.Tensor,
-        target: torch.Tensor,
-        lengths: torch.Tensor,
-    ) -> torch.Tensor:
-        B, L = error_mask.shape
-        device = error_mask.device
-        span_mask = torch.zeros((B, L), dtype=torch.bool, device=device)
-        valid_for_mask = (~padding_mask) & (target != -100)
-
-        for b in range(B):
-            valid_errors = error_mask[b] & valid_for_mask[b]
-            if valid_errors.sum().item() < int(self.span_min_error_tokens):
-                continue
-            spans = self._extract_contiguous_spans(valid_errors)
-            if len(spans) == 0:
-                continue
-            positions: List[torch.Tensor] = []
-            for start, end in spans:
-                if self.span_max_len is not None and int(self.span_max_len) > 0:
-                    end = min(end, start + int(self.span_max_len) - 1)
-                if end >= start:
-                    positions.append(torch.arange(start, end + 1, device=device, dtype=torch.long))
-            if len(positions) == 0:
-                continue
-            pos = torch.cat(positions, dim=0)
-
-            if self.span_max_ratio is not None and float(self.span_max_ratio) > 0.0:
-                budget = int(max(1, int(lengths[b].item() * float(self.span_max_ratio))))
-                if pos.numel() > budget:
-                    pos = pos[:budget]
-            span_mask[b, pos] = True
-
-        span_mask = span_mask & valid_for_mask
-        return span_mask
-
-    def _build_masked_hidden(self, x: torch.Tensor, span_mask: torch.Tensor) -> torch.Tensor:
-        if span_mask.sum().item() == 0:
-            return x
-        x_masked = x.clone()
-        mask_vec = self.mask_embed.to(device=x.device, dtype=x.dtype)
-        x_masked[span_mask] = mask_vec
-        return x_masked
-
-    def _compute_span_mlm_loss(self, logits: torch.Tensor, target: torch.Tensor, span_mask: torch.Tensor) -> torch.Tensor:
-        effective_mask = span_mask & (target != -100)
-        if effective_mask.sum().item() == 0:
-            return torch.tensor(0.0, device=logits.device, requires_grad=True)
-        labels = target.clone()
-        labels[~effective_mask] = -100
-        return F.cross_entropy(
-            logits.reshape(-1, self.vocab_size).float(),
-            labels.reshape(-1),
-            ignore_index=-100,
-        )
-
     def _compute_ref_loss(self, logits, target):
+        valid_mask = (target != -100)
+        if not valid_mask.any():
+            return torch.tensor(0.0, device=logits.device, requires_grad=True)
+            
         return F.cross_entropy(
             logits.reshape(-1, self.vocab_size),
             target.reshape(-1),
@@ -273,9 +215,6 @@ class NonCausalRefiner(nn.Module):
         )
 
     def _compute_error_weighted_loss(self, logits, target, predict, padding_mask):
-        """
-        在全位置 CE 的基础上，对错误位置加权
-        """
         error_mask = (predict != target) & (~padding_mask) & (target != -100)
 
         loss_per_token = F.cross_entropy(
@@ -290,90 +229,81 @@ class NonCausalRefiner(nn.Module):
         weights[padding_mask] = 0.0
         weights[target == -100] = 0.0
 
-        loss_error = (loss_per_token * weights).sum() / (weights.sum() + 1e-8)
+        weight_sum = weights.sum()
+        if weight_sum < 1e-6:
+            return torch.tensor(0.0, device=logits.device, requires_grad=True), error_mask
+
+        loss_error = (loss_per_token * weights).sum() / (weight_sum + 1e-8)
         return loss_error, error_mask
 
     def forward(
         self,
-        hidden: torch.Tensor,           # [B, L, 512]
-        target: torch.Tensor,           # [B, L]
-        lengths: torch.Tensor,          # [B]
-        predict: torch.Tensor,          # [B, L]
+        hidden: torch.Tensor,
+        target: torch.Tensor,
+        lengths: torch.Tensor,
+        predict: torch.Tensor,
         encoder_out: torch.Tensor = None,
         encoder_mask: torch.Tensor = None,
         compute_ref_loss: bool = True,
         compute_error_loss: bool = True,
-        compute_mlm_loss: bool = True,
     ):
         target = target.long()
         predict = predict.long()
 
-        result = {
-            "logits_ref": None,
-            "loss_ref": torch.tensor(0.0, device=hidden.device),
-            "loss_error": torch.tensor(0.0, device=hidden.device),
-            "loss_mlm": torch.tensor(0.0, device=hidden.device),
-            "error_mask": None,
-            "span_mask": None,
-        }
+        if torch.isnan(hidden).any(): # 修改原因：安全性增强
+            print("Warning: Detected NaN in Refiner input 'hidden'. Skipping NAR loss.")
+            return {
+                "logits_ref": None,
+                "loss_ref": torch.tensor(0.0, device=hidden.device, requires_grad=True),
+                "loss_error": torch.tensor(0.0, device=hidden.device, requires_grad=True),
+                "error_mask": None,
+            }
 
         B, L, _ = hidden.shape
         padding_mask = self._build_padding_mask(lengths, L).to(hidden.device)
 
-        # ===== 预处理 hidden =====
         x = self._prepare_hidden(hidden, encoder_out=encoder_out, encoder_mask=encoder_mask)
 
-        # ===== 非因果 Refiner =====
         x = self.refiner(x, src_key_padding_mask=padding_mask)
         x = self.final_norm(x)
-        logits_ref = self.output_layer(x)    # [B, L, V]
-        result["logits_ref"] = logits_ref
+        logits_ref = self.output_layer(x)
+        
+        logits_ref = torch.clamp(logits_ref, min=-100, max=100) # 修改原因：数值稳定性增强
+        
+        result = {
+            "logits_ref": logits_ref,
+            "loss_ref": torch.tensor(0.0, device=hidden.device, requires_grad=True),
+            "loss_error": torch.tensor(0.0, device=hidden.device, requires_grad=True),
+            "error_mask": None,
+        }
 
-        # ===== 主任务：hidden -> Y =====
         if compute_ref_loss:
             loss_ref = self._compute_ref_loss(logits_ref, target)
             result["loss_ref"] = loss_ref
 
-        # ===== 辅助任务：错误位置增强 =====
         if compute_error_loss:
-            loss_error, error_mask = self._compute_error_weighted_loss(
-                logits_ref, target, predict, padding_mask
-            )
+            loss_error, error_mask = self._compute_error_weighted_loss(logits_ref, target, predict, padding_mask)
             result["loss_error"] = loss_error
             result["error_mask"] = error_mask
 
-        if self.enable_span_mlm and compute_mlm_loss:
-            error_mask_for_span = (predict != target) & (~padding_mask) & (target != -100)
-            span_mask = self._build_span_mask(error_mask_for_span, padding_mask, target, lengths)
-            result["span_mask"] = span_mask
-
-            x0 = self._prepare_hidden(hidden, encoder_out=encoder_out, encoder_mask=encoder_mask)
-            x_mlm = self._build_masked_hidden(x0, span_mask)
-            x_mlm = self.refiner(x_mlm, src_key_padding_mask=padding_mask)
-            x_mlm = self.final_norm(x_mlm)
-            logits_mlm = self.output_layer(x_mlm)
-            result["loss_mlm"] = self._compute_span_mlm_loss(logits_mlm, target, span_mask)
-
         return result
-        #掩码连续词语句子上下文非因果预测
 
-    @torch.no_grad()
-    def decode(
-        self,
-        hidden: torch.Tensor,
-        lengths: torch.Tensor,
-        encoder_out: torch.Tensor = None,
-        encoder_mask: torch.Tensor = None,
-    ):
+    def decode(self, hidden, lengths, encoder_out=None, encoder_mask=None):
         """
-        推理时直接输出修正后的 token ids
+        推理阶段使用
         """
         B, L, _ = hidden.shape
         padding_mask = self._build_padding_mask(lengths, L).to(hidden.device)
-
+        
         x = self._prepare_hidden(hidden, encoder_out=encoder_out, encoder_mask=encoder_mask)
         x = self.refiner(x, src_key_padding_mask=padding_mask)
         x = self.final_norm(x)
-        logits = self.output_layer(x)
-        pred = torch.argmax(logits, dim=-1)
-        return pred, logits
+        logits_ref = self.output_layer(x)
+        
+        # 使用 argmax 得到预测结果
+        pred_ref = torch.argmax(logits_ref, dim=-1)
+        
+        # 将 padding 位置设为 0 (或者 ignore_id)
+        pred_ref.masked_fill_(padding_mask, 0)
+        
+        return pred_ref, logits_ref

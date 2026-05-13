@@ -11,7 +11,7 @@ encoder_conf:
     dropout_rate: 0.1
     positional_dropout_rate: 0.1
     attention_dropout_rate: 0.1
-    input_layer: 'gpsb' # encoder input type, you can chose conv2d, conv2d6 and conv2d8,gpsb
+    input_layer: 'conv2d' # encoder input type, you can chose conv2d, conv2d6 and conv2d8,gpsb
     normalize_before: True
     cnn_module_kernel: 15
     use_cnn_module: True
@@ -52,6 +52,14 @@ model_conf:
     length_normalized_loss: false
     # 是否使用nar
     if_use_nar: True
+    nar_ref_weight: 0.1
+    nar_error_weight: 0.1
+    nar_mlm_weight: 0.03
+    nar_args:
+      enable_span_mlm: false
+      span_max_len: 3
+      span_max_ratio: 0.15
+      span_min_error_tokens: 1
 
 # 数据集参数
 dataset_conf:
@@ -113,7 +121,7 @@ optimizer_conf:
   optimizer: 'Adam'
   # 优化方法参数
   optimizer_args:
-    lr: 0.00008
+    lr: 0.0001
     weight_decay: !!float 1.e-6
   # 学习率衰减函数，支持Pytorch支持的和项目提供的额外方法
   scheduler: 'WarmupLR'
@@ -138,7 +146,7 @@ train_conf:
   max_epoch: 40
   freeze_decoder_epochs: 20
   # 冻结编码器轮数（用于GPSB预对齐）
-  freeze_encoder_epochs: 6
+  freeze_encoder_epochs: 0
   # 冻结编码器时是否保持前端(embed/GPSB)可训练
   freeze_encoder_keep_embed: true
   # 多少batch打印一次日志

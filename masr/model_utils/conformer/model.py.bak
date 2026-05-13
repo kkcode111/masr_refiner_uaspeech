@@ -13,7 +13,7 @@ from masr.model_utils.loss.label_smoothing_loss import LabelSmoothingLoss
 from masr.model_utils.utils.cmvn import GlobalCMVN
 from masr.model_utils.utils.common import (IGNORE_ID, add_sos_eos, th_accuracy, reverse_pad_list)
 from masr.utils.utils import DictObject
-from mymodel.nar.noncausalrefinerwithfuse import NonCausalRefiner
+from mymodel.nar.noncausalrefinerwithfuse import NonCausalRefiner # 修改原因：切换至集成门控融合与2层结构的优化版
 __all__ = ["ConformerModel"]
 
 
@@ -33,11 +33,7 @@ class ConformerModel(torch.nn.Module):
             lsm_weight: float = 0.0,
             length_normalized_loss: bool = False,
             #是否使用nar
-            if_use_nar: bool = False,
-            nar_ref_weight: float = 0.1,
-            nar_error_weight: float = 0.1,
-            nar_mlm_weight: float = 0.03,
-            nar_args: DictObject = None):
+            if_use_nar: bool = False):
         assert 0.0 <= ctc_weight <= 1.0, ctc_weight
         super().__init__()
         self.input_size = input_size
@@ -65,21 +61,13 @@ class ConformerModel(torch.nn.Module):
                                     **decoder_conf.decoder_args if decoder_conf.decoder_args is not None else {})
 
         self.ctc = CTCLoss(vocab_size, self.encoder.output_size())
-        self.nar_ref_weight = nar_ref_weight
-        self.nar_error_weight = nar_error_weight
-        self.nar_mlm_weight = nar_mlm_weight
         if if_use_nar:
-            nar_kwargs = {}
-            if nar_args is not None:
-                nar_kwargs = dict(nar_args)
-                nar_kwargs.pop("vocab_size", None)
-                nar_kwargs.pop("input_dim", None)
-                nar_kwargs.pop("hidden_dim", None)
             self.nar = NonCausalRefiner(
                 vocab_size=vocab_size,
-                input_dim=self.encoder.output_size(),
+                input_dim=self.encoder.output_size() * 2,  # 拼接左右 hidden，所以维度翻倍
                 hidden_dim=self.encoder.output_size(),
-                **nar_kwargs,
+                num_layers=2, # 修改原因：手动指定2层结构以降低复杂度并缓解过拟合
+                fusion_type="gate", # 修改原因：启用门控融合以优化双向隐层特征的筛选
             )
         else:
             self.nar = None
@@ -126,7 +114,6 @@ class ConformerModel(torch.nn.Module):
         acc_att = 0.0
         loss_nar_ref = torch.tensor(0.0, device=encoder_out.device)
         loss_nar_error = torch.tensor(0.0, device=encoder_out.device)
-        loss_nar_mlm = torch.tensor(0.0, device=encoder_out.device)
         if self.ctc_weight != 1.0:
             loss_att, acc_att, nar_info = self._calc_att_loss(
                 encoder_out,
@@ -137,7 +124,6 @@ class ConformerModel(torch.nn.Module):
             )
             loss_nar_ref = nar_info.get("loss_nar_ref", loss_nar_ref)
             loss_nar_error = nar_info.get("loss_nar_error", loss_nar_error)
-            loss_nar_mlm = nar_info.get("loss_nar_mlm", loss_nar_mlm)
         else:
             loss_att = None
         # 2b. CTC branch
@@ -159,7 +145,6 @@ class ConformerModel(torch.nn.Module):
             "acc_att": acc_att,
             "loss_nar_ref": loss_nar_ref,
             "loss_nar_error": loss_nar_error,
-            "loss_nar_mlm": loss_nar_mlm,
         }
 
     def _calc_att_loss(self,
@@ -187,8 +172,9 @@ class ConformerModel(torch.nn.Module):
         r_ys_in_pad, r_ys_out_pad = add_sos_eos(r_ys_pad, self.sos, self.eos, self.ignore_id)
         # 1. Forward decoder
         left_decoder_hidden = None
+        right_decoder_hidden = None
         if self.nar is not None:
-            decoder_outputs = self.decoder(
+            decoder_out, r_decoder_out, _, left_decoder_hidden, right_decoder_hidden = self.decoder(
                 encoder_out,
                 encoder_mask,
                 ys_in_pad,
@@ -197,23 +183,44 @@ class ConformerModel(torch.nn.Module):
                 self.reverse_weight,
                 return_hidden=True,
             )
-            decoder_out = decoder_outputs[0]
-            r_decoder_out = decoder_outputs[1]
-            left_decoder_hidden = decoder_outputs[3]
         else:
             decoder_out, r_decoder_out, _ = self.decoder(
                 encoder_out, encoder_mask, ys_in_pad, ys_in_lens, r_ys_in_pad, self.reverse_weight)
 
         # 2. Compute attention loss
-        loss_att = self.criterion_att(decoder_out, ys_out_pad)
-        r_loss_att = torch.tensor(0.0, device=encoder_out.device)
+        loss_att_left = self.criterion_att(decoder_out, ys_out_pad)
+        loss_att_right = torch.tensor(0.0, device=encoder_out.device)
         if self.reverse_weight > 0.0:
-            r_loss_att = self.criterion_att(r_decoder_out, r_ys_out_pad)
-        loss_att = loss_att * (1 - self.reverse_weight) + r_loss_att * self.reverse_weight
+            loss_att_right = self.criterion_att(r_decoder_out, r_ys_out_pad)
+        
+        # 恢复 1.0 级别的总权重分配：(1-rev)*Left + rev*Right
+        # 如果 reverse_weight 设为 0.1，则 Left 占 0.9，Right 占 0.1，总和为 1.0
+        loss_att = loss_att_left * (1 - self.reverse_weight) + loss_att_right * self.reverse_weight
+        
         nar_info: Dict[str, torch.Tensor] = {}
         if self.nar is not None:
             U = ys_pad.size(1)
+            # 融合左右隐藏状态
+            # left_decoder_hidden: [B, U+1, D] -> [B, U, D] (去掉 <sos>)
             hidden_text = left_decoder_hidden[:, 1:U + 1, :]
+            
+            # 如果存在右向隐藏状态，进行对齐并融合
+            if right_decoder_hidden is not None:
+                # right_decoder_hidden 也是 [B, U+1, D]
+                # 它对应的是 r_ys_in_pad，即反向序列。
+                # 原始 ys_pad: [W1, W2, W3, <eos>]
+                # r_ys_pad: [<eos>, W3, W2, W1]
+                # r_ys_in_pad: [<sos>, <eos>, W3, W2] (注意 shift 逻辑)
+                # 我们需要将其翻转回 [W1, W2, W3] 的顺序与 left 对齐
+                # 取出有效 hidden 并翻转
+                r_hidden_text = right_decoder_hidden[:, 1:U + 1, :]
+                r_hidden_text = torch.flip(r_hidden_text, dims=[1])
+                # 融合：由相加改为拼接 (Concat)
+                hidden_text = torch.cat([hidden_text, r_hidden_text], dim=-1)
+            else:
+                # 如果没有右向，则复制一份左向进行拼接，保持维度一致
+                hidden_text = torch.cat([hidden_text, hidden_text], dim=-1)
+
             predict_logits = decoder_out[:, 0:U, :]
             pred_text = torch.argmax(torch.nn.functional.log_softmax(predict_logits, dim=-1), dim=-1)
             target = ys_pad.clone().to(torch.long)
@@ -231,165 +238,15 @@ class ConformerModel(torch.nn.Module):
                 encoder_mask=encoder_mask,
                 compute_ref_loss=True,
                 compute_error_loss=True,
-                compute_mlm_loss=True,
             )
-            loss_att = loss_att + self.nar_ref_weight * nar_res["loss_ref"] + self.nar_error_weight * nar_res["loss_error"]
-            if "loss_mlm" in nar_res:
-                loss_att = loss_att + self.nar_mlm_weight * nar_res["loss_mlm"]
+            weight_ref=0.1
+            weight_error=0.1
+            loss_att = loss_att + weight_ref*nar_res["loss_ref"] + weight_error*nar_res["loss_error"]
             nar_info = {
                 "loss_nar_ref": nar_res["loss_ref"],
                 "loss_nar_error": nar_res["loss_error"],
-                "loss_nar_mlm": nar_res.get("loss_mlm", torch.tensor(0.0, device=encoder_out.device)),
             }
         acc_att = th_accuracy(decoder_out.view(-1, self.vocab_size),
                               ys_out_pad,
                               ignore_label=self.ignore_id)
         return loss_att, acc_att, nar_info
-
-    @torch.jit.export
-    def subsampling_rate(self) -> int:
-        return self.encoder.embed.subsampling_rate
-
-    @torch.jit.export
-    def right_context(self) -> int:
-        return self.encoder.embed.right_context
-
-    @torch.jit.export
-    def ignore_symbol(self) -> int:
-        return self.ignore_id
-
-    @torch.jit.export
-    def sos_symbol(self) -> int:
-        return self.sos
-
-    @torch.jit.export
-    def eos_symbol(self) -> int:
-        return self.eos
-
-    @torch.jit.export
-    def get_encoder_out(self, speech: torch.Tensor, speech_lengths: torch.Tensor) -> \
-            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """ Get encoder output
-
-        Args:
-            speech (torch.Tensor): (batch, max_len, feat_dim)
-            speech_lengths (torch.Tensor): (batch, )
-        Returns:
-            Tensor: ctc softmax output
-        """
-        encoder_outs, encoder_mask = self.encoder(speech,
-                                                  speech_lengths,
-                                                  decoding_chunk_size=-1,
-                                                  num_decoding_left_chunks=-1)  # (B, maxlen, encoder_dim)
-        ctc_probs = self.ctc.log_softmax(encoder_outs)
-        encoder_lens = encoder_mask.squeeze(1).sum(1)
-        return encoder_outs, ctc_probs, encoder_lens
-
-    @torch.jit.export
-    def get_encoder_out_chunk(self,
-                              speech: torch.Tensor,
-                              offset: int,
-                              required_cache_size: int,
-                              att_cache: torch.Tensor = torch.zeros([0, 0, 0, 0]),
-                              cnn_cache: torch.Tensor = torch.zeros([0, 0, 0, 0])) -> \
-            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """ Get encoder output
-
-        Args:
-            speech (torch.Tensor): (batch, max_len, feat_dim)
-        Returns:
-            Tensor: ctc softmax output
-        """
-        xs, att_cache, cnn_cache = self.encoder.forward_chunk(xs=speech,
-                                                              offset=offset,
-                                                              required_cache_size=required_cache_size,
-                                                              att_cache=att_cache,
-                                                              cnn_cache=cnn_cache)
-        ctc_probs = self.ctc.log_softmax(xs)
-        return ctc_probs, att_cache, cnn_cache
-
-    @torch.jit.export
-    def get_decoder_out(
-            self,
-            hyps: torch.Tensor,
-            hyps_lens: torch.Tensor,
-            encoder_out: torch.Tensor,
-            reverse_weight: float = 0,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """ Export interface for c++ call, forward decoder with multiple
-            hypothesis from ctc prefix beam search and one encoder output
-        Args:
-            hyps (torch.Tensor): hyps from ctc prefix beam search, already
-                pad sos at the begining
-            hyps_lens (torch.Tensor): length of each hyp in hyps
-            encoder_out (torch.Tensor): corresponding encoder output
-            r_hyps (torch.Tensor): hyps from ctc prefix beam search, already
-                pad eos at the begining which is used fo right to left decoder
-            reverse_weight: used for verfing whether used right to left decoder,
-            > 0 will use.
-
-        Returns:
-            torch.Tensor: decoder output
-            torch.Tensor: reverse decoder output
-            torch.Tensor: refiner output
-        """
-        assert encoder_out.size(0) == 1
-        num_hyps = hyps.size(0)
-        assert hyps_lens.size(0) == num_hyps
-        encoder_out_repeat = encoder_out.repeat(num_hyps, 1, 1)
-        encoder_mask = torch.ones(num_hyps,
-                                  1,
-                                  encoder_out_repeat.size(1),
-                                  dtype=torch.bool,
-                                  device=encoder_out_repeat.device)
-        r_hyps_lens = hyps_lens - 1
-        r_hyps = hyps[:, 1:]
-        max_len = torch.max(r_hyps_lens)
-        index_range = torch.arange(0, max_len, 1).to(encoder_out_repeat.device)
-        seq_len_expand = r_hyps_lens.unsqueeze(1)
-        seq_mask = seq_len_expand > index_range  # (beam, max_len)
-        index = (seq_len_expand - 1) - index_range  # (beam, max_len)
-        index = index * seq_mask
-        r_hyps = torch.gather(r_hyps, 1, index)
-        r_hyps = torch.where(seq_mask, r_hyps, self.eos)
-        r_hyps = torch.cat([hyps[:, 0:1], r_hyps], dim=1)
-        
-        # 万能解包：不再死板要求 5 个值，通过索引获取，兼容性更强
-        decoder_outputs = self.decoder(
-            encoder_out_repeat, encoder_mask, hyps, hyps_lens, r_hyps,
-            reverse_weight, return_hidden=True)
-        
-        decoder_out = decoder_outputs[0]
-        r_decoder_out = decoder_outputs[1]
-        # olens = decoder_outputs[2]
-        left_hidden = decoder_outputs[3] # 无论 4 个还是 5 个值，第 4 个始终是 left_hidden
-
-        # 计算 Refiner 输出
-        refiner_out = torch.zeros(num_hyps, hyps.size(1) - 1, self.vocab_size, device=decoder_out.device)
-        if self.nar is not None:
-            # 去掉 <sos> 位置，对齐文本长度
-            # left_hidden: [B, L+1, D] -> [B, L, D]
-            U = hyps.size(1) - 1
-            hidden_text = left_hidden[:, 1:U + 1, :]
-            # 为了调用 nar.decode，需要准备真实的 hyps_lens (去掉 sos)
-            real_hyps_lens = hyps_lens - 1
-            
-            # 由于 get_decoder_out 是针对 beam_size 的，这里 encoder_out 已经是 repeat 后的了
-            # 我们需要把原始的 encoder_mask 传给 Refiner
-            _, refiner_logits = self.nar.decode(
-                hidden=hidden_text,
-                lengths=real_hyps_lens,
-                encoder_out=encoder_out_repeat,
-                encoder_mask=encoder_mask
-            )
-            # 对 logits 进行 log_softmax
-            refiner_out = torch.nn.functional.log_softmax(refiner_logits, dim=-1)
-
-        decoder_out = torch.nn.functional.log_softmax(decoder_out, dim=-1)
-        r_decoder_out = torch.nn.functional.log_softmax(r_decoder_out, dim=-1)
-        return decoder_out, r_decoder_out, refiner_out
-
-    @torch.no_grad()
-    def export(self):
-        static_model = torch.jit.script(self.eval())
-        return static_model
