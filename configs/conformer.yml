@@ -54,9 +54,9 @@ model_conf:
     if_use_nar: True
     nar_ref_weight: 0.1
     nar_error_weight: 0.1
-    nar_mlm_weight: 0.03
+    nar_mlm_weight: 0.05
     nar_args:
-      enable_span_mlm: false
+      enable_span_mlm: True
       span_max_len: 3
       span_max_ratio: 0.15
       span_min_error_tokens: 1
@@ -78,7 +78,7 @@ dataset_conf:
     manifest_type: 'txt'
   batch_sampler:
     # 训练的批量大小
-    batch_size: 8
+    batch_size: 32
     sortagrad: True
     drop_last: True
     shuffle: True
@@ -121,7 +121,7 @@ optimizer_conf:
   optimizer: 'Adam'
   # 优化方法参数
   optimizer_args:
-    lr: 0.0001
+    lr: 0.0002
     weight_decay: !!float 1.e-6
   # 学习率衰减函数，支持Pytorch支持的和项目提供的额外方法
   scheduler: 'WarmupLR'

@@ -356,6 +356,8 @@ class MASRTrainer(object):
         else:
             model_context = nullcontext
         train_times, reader_times, batch_times, loss_sum = [], [], [], []
+        loss_att_sum, loss_ctc_sum = [], []
+        loss_nar_ref_sum, loss_nar_error_sum, loss_nar_mlm_sum = [], [], []
         start = time.time()
         enable_amp = self.configs.train_conf.enable_amp
         if isinstance(enable_amp, str):
@@ -403,6 +405,16 @@ class MASRTrainer(object):
                     self.optimizer.zero_grad()
                     self.scheduler.step()
                 loss_sum.append(loss.data.cpu().numpy())
+                if loss_dict.get("loss_att", None) is not None:
+                    loss_att_sum.append(float(loss_dict["loss_att"].detach().float().cpu()))
+                if loss_dict.get("loss_ctc", None) is not None:
+                    loss_ctc_sum.append(float(loss_dict["loss_ctc"].detach().float().cpu()))
+                if loss_dict.get("loss_nar_ref", None) is not None:
+                    loss_nar_ref_sum.append(float(loss_dict["loss_nar_ref"].detach().float().cpu()))
+                if loss_dict.get("loss_nar_error", None) is not None:
+                    loss_nar_error_sum.append(float(loss_dict["loss_nar_error"].detach().float().cpu()))
+                if loss_dict.get("loss_nar_mlm", None) is not None:
+                    loss_nar_mlm_sum.append(float(loss_dict["loss_nar_mlm"].detach().float().cpu()))
                 train_times.append((time.time() - start) * 1000)
                 batch_times.append((time.time() - start_step) * 1000)
                 self.train_step += 1
@@ -428,8 +440,23 @@ class MASRTrainer(object):
                     # 记录学习率
                     writer.add_scalar('Train/lr', self.scheduler.get_last_lr()[0], self.train_log_step)
                     writer.add_scalar('Train/Loss', self.train_loss, self.train_log_step)
+                    if len(loss_att_sum) > 0:
+                        writer.add_scalar('Train/Loss_att', sum(loss_att_sum) / len(loss_att_sum), self.train_log_step)
+                    if len(loss_ctc_sum) > 0:
+                        writer.add_scalar('Train/Loss_ctc', sum(loss_ctc_sum) / len(loss_ctc_sum), self.train_log_step)
+                    if len(loss_nar_ref_sum) > 0:
+                        writer.add_scalar('Train/Loss_nar_ref', sum(loss_nar_ref_sum) / len(loss_nar_ref_sum),
+                                          self.train_log_step)
+                    if len(loss_nar_error_sum) > 0:
+                        writer.add_scalar('Train/Loss_nar_error', sum(loss_nar_error_sum) / len(loss_nar_error_sum),
+                                          self.train_log_step)
+                    if len(loss_nar_mlm_sum) > 0:
+                        writer.add_scalar('Train/Loss_nar_mlm', sum(loss_nar_mlm_sum) / len(loss_nar_mlm_sum),
+                                          self.train_log_step)
                     self.train_log_step += 1
                     train_times, reader_times, batch_times, loss_sum = [], [], [], []
+                    loss_att_sum, loss_ctc_sum = [], []
+                    loss_nar_ref_sum, loss_nar_error_sum, loss_nar_mlm_sum = [], [], []
                 # 固定步数也要保存一次模型
                 if batch_id % 10000 == 0 and batch_id != 0 and self.local_rank == 0:
                     save_checkpoint(configs=self.configs, model=self.model, optimizer=self.optimizer,
