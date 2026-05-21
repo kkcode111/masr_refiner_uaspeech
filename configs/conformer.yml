@@ -11,7 +11,7 @@ encoder_conf:
     dropout_rate: 0.1
     positional_dropout_rate: 0.1
     attention_dropout_rate: 0.1
-    input_layer: 'conv2d' # encoder input type, you can chose conv2d, conv2d6 and conv2d8,gpsb
+    input_layer: 'gpsb' # encoder input type, you can chose conv2d, conv2d6 and conv2d8,gpsb
     normalize_before: True
     cnn_module_kernel: 15
     use_cnn_module: True
@@ -20,7 +20,7 @@ encoder_conf:
     # GPSB并联分支通道数（用于网格搜索：32/48）
     gpsb_branch_channels: 48
     # GPSB并联融合系数alpha初始化（用于网格搜索：0.0/0.05）
-    gpsb_alpha_init: 0.05
+    gpsb_alpha_init: 0.0
 
 # 解码器
 decoder_conf:
@@ -54,7 +54,7 @@ model_conf:
     if_use_nar: True
     nar_ref_weight: 0.1
     nar_error_weight: 0.1
-    nar_mlm_weight: 0.05
+    nar_mlm_weight: 0.03
     nar_args:
       enable_span_mlm: True
       span_max_len: 3
@@ -128,7 +128,7 @@ optimizer_conf:
   # 学习率衰减函数参数
   scheduler_args:
     # 学习率预热步数，对应的是step/accum_grad
-    warmup_steps: 10000
+    warmup_steps: 25000
     # 最小学习率
     min_lr: 1.e-5
 
@@ -146,7 +146,7 @@ train_conf:
   max_epoch: 40
   freeze_decoder_epochs: 20
   # 冻结编码器轮数（用于GPSB预对齐）
-  freeze_encoder_epochs: 0
+  freeze_encoder_epochs: 33
   # 冻结编码器时是否保持前端(embed/GPSB)可训练
   freeze_encoder_keep_embed: true
   # 多少batch打印一次日志

@@ -19,7 +19,7 @@ add_arg("max_text_duration", int,   50,                            "测试过滤
 add_arg("display_result",    bool,  False,                         "是否打印每条数据的识别结果")
 add_arg("save_json",         bool,  True,                          "是否自动保存评估结果为JSON")
 add_arg("save_json_dir",     str,   "eval-results",                "自动保存评估结果JSON的目录")
-add_arg('resume_model',      str,   'uaspeechmodel/refiner_v3/ConformerModel_fbank/best_model/',  "模型的路径")
+add_arg('resume_model',      str,   'uaspeechmodel/refiner_v10_2/ConformerModel_fbank/best_model/',  "模型的路径")
 add_arg('overwrites',        str,    None,    '覆盖配置文件中的参数，比如"train_conf.max_epoch=100"，多个用逗号隔开')
 args = parser.parse_args()
 print_arguments(args=args)

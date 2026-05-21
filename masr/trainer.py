@@ -453,6 +453,19 @@ class MASRTrainer(object):
                     if len(loss_nar_mlm_sum) > 0:
                         writer.add_scalar('Train/Loss_nar_mlm', sum(loss_nar_mlm_sum) / len(loss_nar_mlm_sum),
                                           self.train_log_step)
+                    try:
+                        m = self.model.module if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) else self.model
+                        embed = getattr(getattr(m, 'encoder', None), 'embed', None)
+                        if embed is not None and hasattr(embed, 'get_alpha_value'):
+                            alpha_value = embed.get_alpha_value()
+                            if alpha_value is not None:
+                                writer.add_scalar('Train/GPSB_alpha', float(alpha_value), self.train_log_step)
+                        if embed is not None and hasattr(embed, 'get_alpha_grad'):
+                            alpha_grad = embed.get_alpha_grad()
+                            if alpha_grad is not None:
+                                writer.add_scalar('Train/GPSB_alpha_grad', float(alpha_grad), self.train_log_step)
+                    except Exception:
+                        pass
                     self.train_log_step += 1
                     train_times, reader_times, batch_times, loss_sum = [], [], [], []
                     loss_att_sum, loss_ctc_sum = [], []
@@ -576,7 +589,7 @@ class MASRTrainer(object):
             logger.info(f'评估数据：{len(self.test_dataset)}')
 
         self.train_loss, self.eval_loss = None, None
-        self.test_log_step, self.train_log_step = 0, 0
+        self.test_log_step, self.train_log_step = last_epoch, last_epoch * (len(self.train_loader) // self.configs.train_conf.log_interval)
         self.train_batch_sampler.epoch = last_epoch
         if self.local_rank == 0:
             writer.add_scalar('Train/lr', self.scheduler.get_last_lr()[0], last_epoch)

@@ -156,7 +156,7 @@ class NonCausalRefiner(nn.Module):
                 use_gate=True,
             )
 
-        # 非因果 Transformer Encoder
+        
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_dim,
             nhead=num_heads,
@@ -170,9 +170,27 @@ class NonCausalRefiner(nn.Module):
             encoder_layer,
             num_layers=num_layers
         )
-
         self.final_norm = nn.LayerNorm(hidden_dim)
         self.output_layer = nn.Linear(hidden_dim, vocab_size)
+
+        if self.enable_span_mlm:
+            self.semantic_proj = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim)
+            )
+            aux_layer = nn.TransformerEncoderLayer(
+                d_model=hidden_dim,
+                nhead=num_heads,
+                dim_feedforward=ffn_dim,
+                dropout=dropout,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            )
+            self.aux_refiner = nn.TransformerEncoder(aux_layer, num_layers=num_layers)
+            self.aux_norm = nn.LayerNorm(hidden_dim)
+            self.aux_output_layer = nn.Linear(hidden_dim, vocab_size)
 
     def _build_padding_mask(self, lengths: torch.Tensor, max_len: int):
         """
@@ -347,15 +365,15 @@ class NonCausalRefiner(nn.Module):
             span_mask = self._build_span_mask(error_mask_for_span, padding_mask, target, lengths)
             result["span_mask"] = span_mask
 
-            x0 = self._prepare_hidden(hidden, encoder_out=encoder_out, encoder_mask=encoder_mask)
-            x_mlm = self._build_masked_hidden(x0, span_mask)
-            x_mlm = self.refiner(x_mlm, src_key_padding_mask=padding_mask)
-            x_mlm = self.final_norm(x_mlm)
-            logits_mlm = self.output_layer(x_mlm)
+            x0 = self._prepare_hidden(hidden, encoder_out=encoder_out, encoder_mask=encoder_mask).detach()
+            x_sem = x0 + self.semantic_proj(x0)
+            x_mlm = self._build_masked_hidden(x_sem, span_mask)
+            x_mlm = self.aux_refiner(x_mlm, src_key_padding_mask=padding_mask)
+            x_mlm = self.aux_norm(x_mlm)
+            logits_mlm = self.aux_output_layer(x_mlm)
             result["loss_mlm"] = self._compute_span_mlm_loss(logits_mlm, target, span_mask)
 
         return result
-        #掩码连续词语句子上下文非因果预测
 
     @torch.no_grad()
     def decode(
@@ -372,8 +390,19 @@ class NonCausalRefiner(nn.Module):
         padding_mask = self._build_padding_mask(lengths, L).to(hidden.device)
 
         x = self._prepare_hidden(hidden, encoder_out=encoder_out, encoder_mask=encoder_mask)
-        x = self.refiner(x, src_key_padding_mask=padding_mask)
-        x = self.final_norm(x)
-        logits = self.output_layer(x)
+        
+        x_main = self.refiner(x, src_key_padding_mask=padding_mask)
+        x_main = self.final_norm(x_main)
+        logits_main = self.output_layer(x_main)
+        
+        if self.enable_span_mlm:
+            x_sem = x + self.semantic_proj(x)
+            x_aux = self.aux_refiner(x_sem, src_key_padding_mask=padding_mask)
+            x_aux = self.aux_norm(x_aux)
+            logits_aux = self.aux_output_layer(x_aux)
+            logits = logits_main + 0.5 * logits_aux
+        else:
+            logits = logits_main
+            
         pred = torch.argmax(logits, dim=-1)
         return pred, logits

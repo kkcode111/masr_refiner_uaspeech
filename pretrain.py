@@ -85,7 +85,7 @@ def pretrain(
         print(f"test_dataset: {len(trainer.test_dataset)}")
 
     trainer.train_loss, trainer.eval_loss = None, None
-    trainer.test_log_step, trainer.train_log_step = 0, 0
+    trainer.test_log_step, trainer.train_log_step = last_epoch, last_epoch * (len(trainer.train_loader) // trainer.configs.train_conf.log_interval)
     trainer.train_batch_sampler.epoch = last_epoch
     trainer._maybe_update_decoder_freeze(last_epoch + 1)
 

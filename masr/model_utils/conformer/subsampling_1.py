@@ -389,21 +389,9 @@ class GlobalParallelSpectralBranching(BaseSubsampling):
         )
         self.fuse_norm = nn.LayerNorm(odim)
         self.alpha = nn.Parameter(torch.tensor([float(alpha_init)]))
-        self._alpha_value = None
-        self._alpha_grad = None
-        self.alpha.register_hook(self._store_alpha_grad)
         self.pos_enc = pos_enc_class
         self.subsampling_rate = 4
         self.right_context = 6
-
-    def _store_alpha_grad(self, grad: torch.Tensor):
-        self._alpha_grad = grad.detach().float().mean().item()
-
-    def get_alpha_value(self):
-        return self._alpha_value
-
-    def get_alpha_grad(self):
-        return self._alpha_grad
 
     def forward(self, x, x_mask, offset=0):
         # x: [B, T, 80]
@@ -434,9 +422,7 @@ class GlobalParallelSpectralBranching(BaseSubsampling):
 
         # 保底并联融合：初始 alpha=0，先复现基线，再学习增量收益
         t_final = min(base.size(1), delta.size(1))
-        alpha = torch.tanh(self.alpha).to(dtype=base.dtype, device=base.device)
-        self._alpha_value = alpha.detach().float().mean().item()
-        x_final = base[:, :t_final, :] + alpha * delta[:, :t_final, :]
+        x_final = base[:, :t_final, :] + self.alpha * delta[:, :t_final, :]
         x_final = self.fuse_norm(x_final)
 
         # 掩码对齐
