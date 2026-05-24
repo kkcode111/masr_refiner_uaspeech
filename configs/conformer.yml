@@ -20,7 +20,11 @@ encoder_conf:
     # GPSB并联分支通道数（用于网格搜索：32/48）
     gpsb_branch_channels: 48
     # GPSB并联融合系数alpha初始化（用于网格搜索：0.0/0.05）
-    gpsb_alpha_init: 0.0
+    gpsb_alpha_init: -4.0
+    gpsb_use_fuse_norm: false
+    gpsb_gate_init: -2.0
+    gpsb_alpha_warmup_steps: 5000
+    gpsb_alpha_max: 1.0
 
 # 解码器
 decoder_conf:
@@ -45,16 +49,17 @@ model_conf:
   model_args:
     # 是否为流式模型
     streaming: True
-    ctc_weight: 0.3
+    ctc_weight: 0.2
     lsm_weight: 0.1
     # 反向解码器权重
     reverse_weight: 0.0
     length_normalized_loss: false
     # 是否使用nar
     if_use_nar: True
-    nar_ref_weight: 0.1
-    nar_error_weight: 0.1
-    nar_mlm_weight: 0.03
+    nar_ref_weight: 0.4
+    nar_error_weight: 1.0
+    nar_mlm_weight: 0.05
+    nar_error_mix_prob: 0.4
     nar_args:
       enable_span_mlm: True
       span_max_len: 3
@@ -140,13 +145,17 @@ train_conf:
   use_compile: False
   # 梯度裁剪
   grad_clip: 5.0
+  eval_before_train: true
   # 梯度累加，变相扩大batch_size的作用
   accum_grad: 4
   # 训练的轮数
   max_epoch: 40
   freeze_decoder_epochs: 20
+  decoder_unfreeze_patience: 5
+  early_stop_after_unfreeze_patience: 10
+  early_stop_min_delta: 0.0
   # 冻结编码器轮数（用于GPSB预对齐）
-  freeze_encoder_epochs: 33
+  freeze_encoder_epochs: 0
   # 冻结编码器时是否保持前端(embed/GPSB)可训练
   freeze_encoder_keep_embed: true
   # 多少batch打印一次日志

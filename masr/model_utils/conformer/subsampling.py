@@ -327,7 +327,11 @@ class GlobalParallelSpectralBranching(BaseSubsampling):
 
     def __init__(self, idim=80, odim=256, dropout_rate=0.1,
                  pos_enc_class=None, branch_channels: int = None,
-                 alpha_init: float = 0.0):
+                 alpha_init: float = -4.0,
+                 use_fuse_norm: bool = False,
+                 gate_init: float = -2.0,
+                 alpha_warmup_steps: int = 0,
+                 alpha_max: float = 1.0):
         super().__init__()
         self.odim = odim
         # 保留基线主干，命名为 conv/out 以兼容旧 checkpoint 键名
@@ -388,9 +392,22 @@ class GlobalParallelSpectralBranching(BaseSubsampling):
             nn.Dropout(dropout_rate)
         )
         self.fuse_norm = nn.LayerNorm(odim)
+        self.use_fuse_norm = use_fuse_norm
+        self.gate_norm = nn.LayerNorm(odim)
+        self.gate_proj = nn.Linear(odim, odim)
+        nn.init.zeros_(self.gate_proj.weight)
+        nn.init.constant_(self.gate_proj.bias, float(gate_init))
         self.alpha = nn.Parameter(torch.tensor([float(alpha_init)]))
+        self.alpha_warmup_steps = max(int(alpha_warmup_steps), 0)
+        self.alpha_max = float(alpha_max)
+        self.register_buffer("_gpsb_step", torch.zeros((), dtype=torch.long))
         self._alpha_value = None
         self._alpha_grad = None
+        self._gate_mean = None
+        self._gpsb_out_mean = None
+        self._gpsb_out_std = None
+        self._residual_l2 = None
+        self._warmup_scale = None
         self.alpha.register_hook(self._store_alpha_grad)
         self.pos_enc = pos_enc_class
         self.subsampling_rate = 4
@@ -404,6 +421,29 @@ class GlobalParallelSpectralBranching(BaseSubsampling):
 
     def get_alpha_grad(self):
         return self._alpha_grad
+
+    def get_gate_mean(self):
+        return self._gate_mean
+
+    def get_gpsb_out_mean(self):
+        return self._gpsb_out_mean
+
+    def get_gpsb_out_std(self):
+        return self._gpsb_out_std
+
+    def get_residual_l2(self):
+        return self._residual_l2
+
+    def get_warmup_scale(self):
+        return self._warmup_scale
+
+    def _current_warmup_scale(self, device, dtype):
+        if self.alpha_warmup_steps <= 0:
+            return torch.ones((), device=device, dtype=dtype)
+        if self.training:
+            self._gpsb_step.add_(1)
+        scale = self._gpsb_step.to(device=device, dtype=dtype) / float(self.alpha_warmup_steps)
+        return torch.clamp(scale, min=0.0, max=1.0)
 
     def forward(self, x, x_mask, offset=0):
         # x: [B, T, 80]
@@ -434,10 +474,21 @@ class GlobalParallelSpectralBranching(BaseSubsampling):
 
         # 保底并联融合：初始 alpha=0，先复现基线，再学习增量收益
         t_final = min(base.size(1), delta.size(1))
-        alpha = torch.tanh(self.alpha).to(dtype=base.dtype, device=base.device)
+        base = base[:, :t_final, :]
+        delta = delta[:, :t_final, :]
+        warmup_scale = self._current_warmup_scale(device=base.device, dtype=base.dtype)
+        alpha = torch.sigmoid(self.alpha).to(dtype=base.dtype, device=base.device) * self.alpha_max * warmup_scale
+        gate = torch.sigmoid(self.gate_proj(self.gate_norm(base)))
+        residual = alpha * gate * delta
         self._alpha_value = alpha.detach().float().mean().item()
-        x_final = base[:, :t_final, :] + alpha * delta[:, :t_final, :]
-        x_final = self.fuse_norm(x_final)
+        self._gate_mean = gate.detach().float().mean().item()
+        self._gpsb_out_mean = delta.detach().float().mean().item()
+        self._gpsb_out_std = delta.detach().float().std(unbiased=False).item()
+        self._residual_l2 = residual.detach().float().pow(2).mean().sqrt().item()
+        self._warmup_scale = warmup_scale.detach().float().item()
+        x_final = base + residual
+        if self.use_fuse_norm:
+            x_final = self.fuse_norm(x_final)
 
         # 掩码对齐
         updated_mask = x_mask[:, :, :-2:2][:, :, :-2:2]

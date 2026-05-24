@@ -53,7 +53,11 @@ class ConformerEncoder(nn.Module):
             cnn_module_norm: str = "layer_norm",
             max_len: int = 5000,
             gpsb_branch_channels: Optional[int] = None,
-            gpsb_alpha_init: float = 0.0
+            gpsb_alpha_init: float = -4.0,
+            gpsb_use_fuse_norm: bool = False,
+            gpsb_gate_init: float = -2.0,
+            gpsb_alpha_warmup_steps: int = 0,
+            gpsb_alpha_max: float = 1.0
     ):
         """Construct ConformerEncoder
 
@@ -134,7 +138,11 @@ class ConformerEncoder(nn.Module):
                 dropout_rate=dropout_rate,
                 pos_enc_class=pos_enc,
                 branch_channels=gpsb_branch_channels,
-                alpha_init=gpsb_alpha_init)
+                alpha_init=gpsb_alpha_init,
+                use_fuse_norm=gpsb_use_fuse_norm,
+                gate_init=gpsb_gate_init,
+                alpha_warmup_steps=gpsb_alpha_warmup_steps,
+                alpha_max=gpsb_alpha_max)
         else:
             self.embed = subsampling_class(
                 idim=input_size,

@@ -460,10 +460,24 @@ class MASRTrainer(object):
                             alpha_value = embed.get_alpha_value()
                             if alpha_value is not None:
                                 writer.add_scalar('Train/GPSB_alpha', float(alpha_value), self.train_log_step)
+                                writer.add_scalar('Train/GPSB/alpha', float(alpha_value), self.train_log_step)
                         if embed is not None and hasattr(embed, 'get_alpha_grad'):
                             alpha_grad = embed.get_alpha_grad()
                             if alpha_grad is not None:
                                 writer.add_scalar('Train/GPSB_alpha_grad', float(alpha_grad), self.train_log_step)
+                                writer.add_scalar('Train/GPSB/alpha_grad', float(alpha_grad), self.train_log_step)
+                        gpsb_debug_scalars = {
+                            'Train/GPSB/gate_mean': 'get_gate_mean',
+                            'Train/GPSB/gpsb_out_mean': 'get_gpsb_out_mean',
+                            'Train/GPSB/gpsb_out_std': 'get_gpsb_out_std',
+                            'Train/GPSB/residual_l2': 'get_residual_l2',
+                            'Train/GPSB/warmup_scale': 'get_warmup_scale',
+                        }
+                        for tag, getter_name in gpsb_debug_scalars.items():
+                            if embed is not None and hasattr(embed, getter_name):
+                                value = getattr(embed, getter_name)()
+                                if value is not None:
+                                    writer.add_scalar(tag, float(value), self.train_log_step)
                     except Exception:
                         pass
                     self.train_log_step += 1
@@ -603,18 +617,34 @@ class MASRTrainer(object):
         # 开始训练
         logger.info(self.model)
         # 如果是恢复训练，先评估一次，确保用户能看到当前加载模型的性能
-        if last_epoch > 0 and self.local_rank == 0:
+        eval_before_train = bool(getattr(self.configs.train_conf, 'eval_before_train', False))
+        should_initial_eval = (last_epoch > 0) or (eval_before_train and last_epoch == 0)
+        if should_initial_eval and self.local_rank == 0:
             logger.info('=' * 70)
             logger.info(f'正在对恢复的模型 (Epoch {last_epoch}) 进行初始评估...')
             self.eval_loss, self.eval_error_result = self.evaluate()
+            writer.add_scalar(f'Test/{self.metrics_type}', self.eval_error_result, self.test_log_step)
+            writer.add_scalar('Test/Loss', self.eval_loss, self.test_log_step)
+            self.test_log_step += 1
             logger.info(f'初始评估结果: loss: {self.eval_loss:.5f}, {self.metrics_type}: {self.eval_error_result:.5f}')
             logger.info('=' * 70)
+
+        freeze_no_improve_epochs = 0
+        finetune_no_improve_epochs = 0
+        decoder_unfrozen_by_patience = False
+        unfreeze_patience = int(getattr(self.configs.train_conf, 'decoder_unfreeze_patience', 5))
+        stop_patience = int(getattr(self.configs.train_conf, 'early_stop_after_unfreeze_patience', 10))
+        min_delta = float(getattr(self.configs.train_conf, 'early_stop_min_delta', 0.0))
 
         for epoch_id in range(last_epoch, self.configs.train_conf.max_epoch):
             if self.stop_train: break
             epoch_id += 1
             self._maybe_update_encoder_freeze(epoch_id)
             self._maybe_update_decoder_freeze(epoch_id)
+            decoder_is_frozen = (
+                isinstance(getattr(self.configs.train_conf, 'freeze_decoder_epochs', None), int)
+                and epoch_id <= getattr(self.configs.train_conf, 'freeze_decoder_epochs', 0)
+            )
             start_epoch = time.time()
             # 训练一个epoch
             self.__train_epoch(epoch_id=epoch_id, save_model_path=save_model_path, writer=writer)
@@ -633,6 +663,7 @@ class MASRTrainer(object):
                 writer.add_scalar('Test/Loss', self.eval_loss, self.test_log_step)
                 self.test_log_step += 1
                 self.model.train()
+                improved = self.eval_error_result < (self.eval_best_error_rate - min_delta)
                 # 保存最优模型
                 if self.eval_error_result <= self.eval_best_error_rate:
                     self.eval_best_error_rate = self.eval_error_result
@@ -644,6 +675,24 @@ class MASRTrainer(object):
                 save_checkpoint(configs=self.configs, model=self.model, optimizer=self.optimizer,
                                 amp_scaler=self.amp_scaler, save_model_path=save_model_path, epoch_id=epoch_id,
                                 error_rate=self.eval_error_result, metrics_type=self.metrics_type)
+
+                if decoder_is_frozen and not decoder_unfrozen_by_patience:
+                    freeze_no_improve_epochs = 0 if improved else freeze_no_improve_epochs + 1
+                    if freeze_no_improve_epochs >= unfreeze_patience:
+                        logger.info(
+                            f'连续{unfreeze_patience}个epoch {self.metrics_type}未下降，提前解冻decoder并继续训练。')
+                        self.configs.train_conf.freeze_decoder_epochs = epoch_id
+                        self._maybe_update_decoder_freeze(epoch_id + 1)
+                        decoder_unfrozen_by_patience = True
+                        decoder_is_frozen = False
+                        finetune_no_improve_epochs = 0
+                elif not decoder_is_frozen:
+                    finetune_no_improve_epochs = 0 if improved else finetune_no_improve_epochs + 1
+                    if stop_patience > 0 and finetune_no_improve_epochs >= stop_patience:
+                        logger.info(
+                            f'decoder未冻结/解冻后连续{stop_patience}个epoch {self.metrics_type}未下降，提前结束训练。')
+                        self.stop_train = True
+                        break
 
     def evaluate(self, resume_model=None, display_result=False, max_text_duration=None, only_ctc_probs=False):
         """评估模型

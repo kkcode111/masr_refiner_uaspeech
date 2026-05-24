@@ -18,6 +18,7 @@ def attention_rescoring(
         blank_id: int = 0,
         ctc_weight: float = 0.3,
         reverse_weight: float = 0.5,
+        refiner_weight: float = 0.1,
 ) -> List:
     """Attention rescoring
 
@@ -31,6 +32,7 @@ def attention_rescoring(
     param blank_id: 空白标签的id
     param ctc_weight: CTC解码器权重
     param reverse_weight: 反向解码器权重
+    param refiner_weight: Refiner打分权重
     return: 解码结果，和所有解码结果，用于attention_rescoring解码器使用
     """
     device = encoder_outs.device
@@ -73,13 +75,13 @@ def attention_rescoring(
                 # 融合 Left Decoder 分数
                 l_score = decoder_out[i][j][w]
                 
-                # 融合 Refiner 分数 (权重 0.1)
+                # 融合 Refiner 分数
                 ref_score = 0.0
                 if refiner_out.dim() > 1:
                     ref_score = refiner_out[i][j][w]
                 
                 # 当前位置的总分
-                score += (1 - 0.1) * l_score + 0.1 * ref_score
+                score += (1 - refiner_weight) * l_score + refiner_weight * ref_score
                 
             # last decoder output token is `eos`, for laste decoder input token.
             score += decoder_out[i][len(hyp[0])][eos]

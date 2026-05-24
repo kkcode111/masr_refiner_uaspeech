@@ -37,6 +37,7 @@ class ConformerModel(torch.nn.Module):
             nar_ref_weight: float = 0.1,
             nar_error_weight: float = 0.1,
             nar_mlm_weight: float = 0.03,
+            nar_error_mix_prob: float = 0.0,
             nar_args: DictObject = None):
         assert 0.0 <= ctc_weight <= 1.0, ctc_weight
         super().__init__()
@@ -68,6 +69,7 @@ class ConformerModel(torch.nn.Module):
         self.nar_ref_weight = nar_ref_weight
         self.nar_error_weight = nar_error_weight
         self.nar_mlm_weight = nar_mlm_weight
+        self.nar_error_mix_prob = nar_error_mix_prob
         if if_use_nar:
             nar_kwargs = {}
             if nar_args is not None:
@@ -213,9 +215,25 @@ class ConformerModel(torch.nn.Module):
         nar_info: Dict[str, torch.Tensor] = {}
         if self.nar is not None:
             U = ys_pad.size(1)
-            hidden_text = left_decoder_hidden[:, 1:U + 1, :]
             predict_logits = decoder_out[:, 0:U, :]
             pred_text = torch.argmax(torch.nn.functional.log_softmax(predict_logits, dim=-1), dim=-1)
+            hidden_text = left_decoder_hidden[:, 0:U, :]
+            if self.training and self.nar_error_mix_prob > 0.0 and U > 1:
+                corrupt_ys_in_pad = ys_in_pad.clone()
+                valid_for_mix = (ys_pad != self.ignore_id) & (ys_pad > 3)
+                mix_mask = torch.rand(valid_for_mix.shape, device=ys_pad.device) < float(self.nar_error_mix_prob)
+                mix_mask = mix_mask & valid_for_mix
+                corrupt_ys_in_pad[:, 1:] = torch.where(mix_mask, pred_text.detach(), corrupt_ys_in_pad[:, 1:])
+                corrupt_outputs = self.decoder(
+                    encoder_out,
+                    encoder_mask,
+                    corrupt_ys_in_pad,
+                    ys_in_lens,
+                    r_ys_in_pad,
+                    self.reverse_weight,
+                    return_hidden=True,
+                )
+                hidden_text = corrupt_outputs[3][:, 0:U, :]
             target = ys_pad.clone().to(torch.long)
             target[target == self.ignore_id] = -100
             pred_text[pred_text == self.ignore_id] = -100
@@ -370,7 +388,7 @@ class ConformerModel(torch.nn.Module):
             # 去掉 <sos> 位置，对齐文本长度
             # left_hidden: [B, L+1, D] -> [B, L, D]
             U = hyps.size(1) - 1
-            hidden_text = left_hidden[:, 1:U + 1, :]
+            hidden_text = left_hidden[:, 0:U, :]
             # 为了调用 nar.decode，需要准备真实的 hyps_lens (去掉 sos)
             real_hyps_lens = hyps_lens - 1
             

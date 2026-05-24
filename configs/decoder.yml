@@ -15,6 +15,8 @@ attention_rescoring_args:
   ctc_weight: 0.2
   # 反向解码器权重
   reverse_weight: 0.0
+  # Refiner rescoring权重，只用于训练完成后的attention_rescoring精评
+  refiner_weight: 0.3
 
 # 解码器参数
 ctc_beam_search_args:
