@@ -1,0 +1,27 @@
+# TORGO paper setting: speed perturbation is encoded by speed_rate in train_speed.jsonl.
+# Keep the runtime augmentation pipeline otherwise disabled.
+speed:
+  prob: 0.0
+
+volume:
+  prob: 0.0
+
+shift:
+  prob: 0.0
+
+resample:
+  prob: 0.0
+
+noise:
+  prob: 0.0
+  noise_dir: 'dataset/noise'
+
+reverb:
+  prob: 0.0
+  reverb_dir: 'dataset/reverb'
+
+spec_aug:
+  prob: 0.0
+
+spec_sub_aug:
+  prob: 0.0

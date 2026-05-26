@@ -1,0 +1,33 @@
+# Use this file as a TORGO transfer checklist/reference.
+# Git does not read this file automatically; use a TORGO branch plus
+# `git rm --cached` for tracked dataset files when preparing a slim remote push.
+
+# Raw / generated datasets
+dataset/audio/
+dataset/torgo/*
+!dataset/torgo/
+!dataset/torgo/train.jsonl
+!dataset/torgo/train_speed.jsonl
+!dataset/torgo/test.jsonl
+!dataset/torgo/mean_istd.json
+dataset/annotation/
+dataset/vocab_model/
+dataset/*.jsonl
+dataset/mean_istd.json
+dataset/test.wav
+dataset/*.zip
+dataset/*.tar
+dataset/*.tar.gz
+dataset/*.tar.bz2
+dataset/*.tgz
+dataset/*.flac
+dataset/*.wav
+
+# Model checkpoints / experiment outputs
+uaspeechmodel/
+torgomodel/
+Comformer_Librispeech/
+pretrain_models/
+eval-results/
+*.pt
+*.ckpt
