@@ -40,7 +40,7 @@ decoder_conf:
 
 model_conf:
   # 所使用的模型
-  model: 'ConformerModel'
+  model: 'ConformerModelA1'
   # 模型参数
   model_args:
     # 是否为流式模型
@@ -48,14 +48,16 @@ model_conf:
     ctc_weight: 0.3
     lsm_weight: 0.1
     # 反向解码器权重
-    reverse_weight: 0.0
+    reverse_weight: 0.5
     length_normalized_loss: false
     # 是否使用nar
     if_use_nar: True
     nar_ref_weight: 0.4
     nar_error_weight: 1.0
     nar_mlm_weight: 0.0
-    nar_error_mix_prob: 0.4
+    nar_error_mix_prob: 0.0
+    # A1: align the right decoder hidden states and average both directions.
+    use_right_hidden: True
     nar_args:
       enable_span_mlm: False
       span_max_len: 3
@@ -87,7 +89,7 @@ dataset_conf:
     # 读取数据的线程数量
     num_workers: 8
   # 训练数据的数据列表路径
-  train_manifest: 'dataset/train_aug.jsonl'
+  train_manifest: 'dataset/train.jsonl'
   # 测试数据的数据列表路径
   test_manifest: 'dataset/test_original.jsonl'
   # 均值和标准值得json文件路径，后缀 (.json)

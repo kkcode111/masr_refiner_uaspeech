@@ -3,6 +3,7 @@ import importlib
 from loguru import logger
 
 from masr.model_utils.conformer.model import ConformerModel
+from masr.model_utils.conformer.model_a1 import ConformerModelA1
 from masr.model_utils.deepspeech2.model import DeepSpeech2Model
 from masr.model_utils.efficient_conformer.model import EfficientConformerModel
 from masr.model_utils.squeezeformer.model import SqueezeformerModel

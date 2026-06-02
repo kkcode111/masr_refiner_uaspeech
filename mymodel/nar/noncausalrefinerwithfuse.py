@@ -127,6 +127,9 @@ class NonCausalRefiner(nn.Module):
         span_max_len: int = 3,
         span_max_ratio: float = 0.15,
         span_min_error_tokens: int = 1,
+        span_random_ratio: float = 0.0,
+        mlm_decode_weight: float = 0.0,
+        mlm_detach_input: bool = True,
     ):
         super().__init__()
 
@@ -139,6 +142,9 @@ class NonCausalRefiner(nn.Module):
         self.span_max_len = span_max_len
         self.span_max_ratio = span_max_ratio
         self.span_min_error_tokens = span_min_error_tokens
+        self.span_random_ratio = span_random_ratio
+        self.mlm_decode_weight = mlm_decode_weight
+        self.mlm_detach_input = mlm_detach_input
 
         # 输入投影
         self.input_proj = nn.Linear(input_dim, hidden_dim)
@@ -263,6 +269,36 @@ class NonCausalRefiner(nn.Module):
         span_mask = span_mask & valid_for_mask
         return span_mask
 
+    def _build_random_span_mask(
+        self,
+        padding_mask: torch.Tensor,
+        target: torch.Tensor,
+        lengths: torch.Tensor,
+    ) -> torch.Tensor:
+        B, L = target.shape
+        device = target.device
+        random_mask = torch.zeros((B, L), dtype=torch.bool, device=device)
+        if self.span_random_ratio is None or float(self.span_random_ratio) <= 0.0:
+            return random_mask
+
+        valid_for_mask = (~padding_mask) & (target != -100)
+        for b in range(B):
+            valid_pos = torch.nonzero(valid_for_mask[b], as_tuple=False).squeeze(1)
+            if valid_pos.numel() == 0:
+                continue
+            budget = int(max(1, int(lengths[b].item() * float(self.span_random_ratio))))
+            budget = min(budget, valid_pos.numel())
+            start = valid_pos[torch.randint(0, valid_pos.numel(), (1,), device=device)].item()
+            span_len = int(torch.randint(1, max(2, int(self.span_max_len) + 1), (1,), device=device).item())
+            end = min(start + span_len, L)
+            candidate = torch.arange(start, end, device=device, dtype=torch.long)
+            candidate = candidate[valid_for_mask[b, candidate]]
+            if candidate.numel() > budget:
+                candidate = candidate[:budget]
+            if candidate.numel() > 0:
+                random_mask[b, candidate] = True
+        return random_mask & valid_for_mask
+
     def _build_masked_hidden(self, x: torch.Tensor, span_mask: torch.Tensor) -> torch.Tensor:
         if span_mask.sum().item() == 0:
             return x
@@ -333,6 +369,8 @@ class NonCausalRefiner(nn.Module):
             "loss_mlm": torch.tensor(0.0, device=hidden.device),
             "error_mask": None,
             "span_mask": None,
+            "mlm_token_count": torch.tensor(0.0, device=hidden.device),
+            "mlm_token_ratio": torch.tensor(0.0, device=hidden.device),
         }
 
         B, L, _ = hidden.shape
@@ -363,9 +401,16 @@ class NonCausalRefiner(nn.Module):
         if self.enable_span_mlm and compute_mlm_loss:
             error_mask_for_span = (predict != target) & (~padding_mask) & (target != -100)
             span_mask = self._build_span_mask(error_mask_for_span, padding_mask, target, lengths)
+            random_span_mask = self._build_random_span_mask(padding_mask, target, lengths)
+            span_mask = span_mask | random_span_mask
             result["span_mask"] = span_mask
+            valid_token_count = ((~padding_mask) & (target != -100)).sum().float().clamp_min(1.0)
+            result["mlm_token_count"] = span_mask.sum().float()
+            result["mlm_token_ratio"] = result["mlm_token_count"] / valid_token_count
 
-            x0 = self._prepare_hidden(hidden, encoder_out=encoder_out, encoder_mask=encoder_mask).detach()
+            x0 = self._prepare_hidden(hidden, encoder_out=encoder_out, encoder_mask=encoder_mask)
+            if self.mlm_detach_input:
+                x0 = x0.detach()
             x_sem = x0 + self.semantic_proj(x0)
             x_mlm = self._build_masked_hidden(x_sem, span_mask)
             x_mlm = self.aux_refiner(x_mlm, src_key_padding_mask=padding_mask)
@@ -395,12 +440,12 @@ class NonCausalRefiner(nn.Module):
         x_main = self.final_norm(x_main)
         logits_main = self.output_layer(x_main)
         
-        if self.enable_span_mlm:
+        if self.enable_span_mlm and self.mlm_decode_weight > 0.0:
             x_sem = x + self.semantic_proj(x)
             x_aux = self.aux_refiner(x_sem, src_key_padding_mask=padding_mask)
             x_aux = self.aux_norm(x_aux)
             logits_aux = self.aux_output_layer(x_aux)
-            logits = logits_main + 0.5 * logits_aux
+            logits = logits_main + self.mlm_decode_weight * logits_aux
         else:
             logits = logits_main
             

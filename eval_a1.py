@@ -11,17 +11,17 @@ from masr.utils.utils import add_arguments, print_arguments
 
 parser = argparse.ArgumentParser(description=__doc__)
 add_arg = functools.partial(add_arguments, argparser=parser)
-add_arg('configs', str, 'configs/conformer_v18.yml', 'configs file')
+add_arg('configs', str, 'configs/conformer_a1.yml', 'configs file')
 add_arg('use_gpu', bool, True, 'use GPU for evaluation')
 add_arg('metrics_type', str, 'wer', 'evaluation metric')
 add_arg('decoder', str, 'attention_rescoring',
         'decoder: ctc_greedy_search, ctc_prefix_beam_search, attention_rescoring, ctc_beam_search')
-add_arg('decoder_configs', str, 'configs/decoder.yml', 'decoder configs file')
+add_arg('decoder_configs', str, 'configs/decoder_a1.yml', 'decoder configs file')
 add_arg('max_text_duration', int, 50, 'max eval audio duration')
 add_arg('display_result', bool, False, 'print each utterance result')
 add_arg('save_json', bool, True, 'save evaluation result to JSON')
 add_arg('save_json_dir', str, 'eval-results', 'directory for JSON results')
-add_arg('resume_model', str, 'uaspeechmodel/refiner_v18/ConformerModel_fbank/best_model/',
+add_arg('resume_model', str, 'uaspeechmodel/refiner_a1/ConformerModelA1_fbank/best_model/',
         'model checkpoint directory or model.pth path')
 add_arg('overwrites', str, None, 'config overwrites, separated by comma')
 add_arg('refiner_weight_grid', str, '0.0,0.1,0.2,0.3,0.4',

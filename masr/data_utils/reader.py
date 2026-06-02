@@ -49,6 +49,7 @@ class MASRDataset(Dataset):
                  min_duration=0,
                  max_duration=20,
                  aug_conf=None,
+                 audio_path_contains=None,
                  manifest_type='txt',
                  sample_rate=16000,
                  use_dB_normalization=True,
@@ -63,6 +64,7 @@ class MASRDataset(Dataset):
         self._target_sample_rate = sample_rate
         self._use_dB_normalization = use_dB_normalization
         self._target_dB = target_dB
+        self.audio_path_contains = audio_path_contains
         self.mode = mode
         self.dataset_reader = None
         self.speed_augment = None
@@ -160,6 +162,8 @@ class MASRDataset(Dataset):
                         continue
                     if max_duration != -1 and line["duration"] > max_duration:
                         continue
+                    if self.audio_path_contains is not None and self.audio_path_contains not in line["audio_filepath"]:
+                        continue
                     data_list.append(dict(line))
             else:
                 # 获取二进制的数据列表
@@ -169,6 +173,11 @@ class MASRDataset(Dataset):
                 data_list = self.dataset_reader.get_keys()
         else:
             data_list = data_manifest
+            if self.audio_path_contains is not None:
+                data_list = [
+                    line for line in data_list
+                    if self.audio_path_contains in line["audio_filepath"]
+                ]
         return data_list
 
     # 获取数据列表中的一条数据

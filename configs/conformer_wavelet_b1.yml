@@ -17,10 +17,12 @@ encoder_conf:
     use_cnn_module: True
     activation_type: 'swish'
     pos_enc_layer_type: 'rel_pos'
-    # GPSB并联分支通道数（用于网格搜索：32/48）
-    gpsb_branch_channels: 48
-    # GPSB并联融合系数alpha初始化（用于网格搜索：0.0/0.05）
-    gpsb_alpha_init: 0.05
+    use_wavelet_residual: true
+    wavelet_insert_layer: 0
+    wavelet_alpha_init: -4.0
+    wavelet_gate_init: -2.0
+    wavelet_alpha_max: 1.0
+    wavelet_dropout: 0.1
 
 # 解码器
 decoder_conf:

@@ -432,7 +432,7 @@ class MASRPredictor:
             # 执行识别
             if self.model_info.model_name == 'DeepSpeech2Model':
                 output_chunk_probs, output_lens = self.predictor.predict_chunk_deepspeech(x_chunk=x_chunk)
-            elif self.model_info.model_name == 'ConformerModel' or self.model_info.model_name == 'SqueezeformerModel' or \
+            elif self.model_info.model_name.startswith('ConformerModel') or self.model_info.model_name == 'SqueezeformerModel' or \
                     self.model_info.model_name == 'EfficientConformerModel':
                 num_decoding_left_chunks = -1
                 required_cache_size = decoding_chunk_size * num_decoding_left_chunks

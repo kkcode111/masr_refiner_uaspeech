@@ -35,6 +35,27 @@ from masr.utils.metrics import cer, wer
 from masr.utils.utils import dict_to_object, print_arguments, convert_string_based_on_type
 
 
+def _is_finite_scalar(value):
+    try:
+        return np.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _to_finite_float(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if np.isfinite(value) else None
+
+
+def _add_scalar_if_finite(writer, tag, value, step):
+    value = _to_finite_float(value)
+    if value is not None:
+        writer.add_scalar(tag, value, step)
+
+
 class MASRTrainer(object):
     def __init__(self,
                  configs,
@@ -44,6 +65,7 @@ class MASRTrainer(object):
                  decoder_configs=None,
                  data_augment_configs=None,
                  overwrites=None,
+                 audio_path_contains=None,
                  log_level="info"):
         """MASR语音识别训练工具类
 
@@ -116,6 +138,7 @@ class MASRTrainer(object):
                 decoder_configs = yaml.load(f.read(), Loader=yaml.FullLoader)
             print_arguments(configs=decoder_configs, title='解码器参数配置')
         self.decoder_configs = decoder_configs if decoder_configs is not None else {}
+        self.audio_path_contains = audio_path_contains
         self.model = None
         self.optimizer = None
         self.scheduler = None
@@ -163,6 +186,7 @@ class MASRTrainer(object):
                                              audio_featurizer=self.audio_featurizer,
                                              tokenizer=self.tokenizer,
                                              aug_conf=self.data_augment_configs,
+                                             audio_path_contains=self.audio_path_contains,
                                              mode='train',
                                              **dataset_args)
             # 设置支持多卡训练
@@ -182,6 +206,7 @@ class MASRTrainer(object):
         self.test_dataset = MASRDataset(data_manifest=self.configs.dataset_conf.test_manifest,
                                         audio_featurizer=self.audio_featurizer,
                                         tokenizer=self.tokenizer,
+                                        audio_path_contains=self.audio_path_contains,
                                         mode='eval',
                                         **dataset_args)
         self.test_loader = DataLoader(dataset=self.test_dataset,
@@ -358,6 +383,7 @@ class MASRTrainer(object):
         train_times, reader_times, batch_times, loss_sum = [], [], [], []
         loss_att_sum, loss_ctc_sum = [], []
         loss_nar_ref_sum, loss_nar_error_sum, loss_nar_mlm_sum = [], [], []
+        nar_mlm_token_count_sum, nar_mlm_token_ratio_sum = [], []
         start = time.time()
         enable_amp = self.configs.train_conf.enable_amp
         if isinstance(enable_amp, str):
@@ -404,17 +430,37 @@ class MASRTrainer(object):
                             self.optimizer.step()
                     self.optimizer.zero_grad()
                     self.scheduler.step()
-                loss_sum.append(loss.data.cpu().numpy())
+                loss_value = _to_finite_float(loss.detach().float().cpu())
+                if loss_value is not None:
+                    loss_sum.append(loss_value)
                 if loss_dict.get("loss_att", None) is not None:
-                    loss_att_sum.append(float(loss_dict["loss_att"].detach().float().cpu()))
+                    value = _to_finite_float(loss_dict["loss_att"].detach().float().cpu())
+                    if value is not None:
+                        loss_att_sum.append(value)
                 if loss_dict.get("loss_ctc", None) is not None:
-                    loss_ctc_sum.append(float(loss_dict["loss_ctc"].detach().float().cpu()))
+                    value = _to_finite_float(loss_dict["loss_ctc"].detach().float().cpu())
+                    if value is not None:
+                        loss_ctc_sum.append(value)
                 if loss_dict.get("loss_nar_ref", None) is not None:
-                    loss_nar_ref_sum.append(float(loss_dict["loss_nar_ref"].detach().float().cpu()))
+                    value = _to_finite_float(loss_dict["loss_nar_ref"].detach().float().cpu())
+                    if value is not None:
+                        loss_nar_ref_sum.append(value)
                 if loss_dict.get("loss_nar_error", None) is not None:
-                    loss_nar_error_sum.append(float(loss_dict["loss_nar_error"].detach().float().cpu()))
+                    value = _to_finite_float(loss_dict["loss_nar_error"].detach().float().cpu())
+                    if value is not None:
+                        loss_nar_error_sum.append(value)
                 if loss_dict.get("loss_nar_mlm", None) is not None:
-                    loss_nar_mlm_sum.append(float(loss_dict["loss_nar_mlm"].detach().float().cpu()))
+                    value = _to_finite_float(loss_dict["loss_nar_mlm"].detach().float().cpu())
+                    if value is not None:
+                        loss_nar_mlm_sum.append(value)
+                if loss_dict.get("nar_mlm_token_count", None) is not None:
+                    value = _to_finite_float(loss_dict["nar_mlm_token_count"].detach().float().cpu())
+                    if value is not None:
+                        nar_mlm_token_count_sum.append(value)
+                if loss_dict.get("nar_mlm_token_ratio", None) is not None:
+                    value = _to_finite_float(loss_dict["nar_mlm_token_ratio"].detach().float().cpu())
+                    if value is not None:
+                        nar_mlm_token_ratio_sum.append(value)
                 train_times.append((time.time() - start) * 1000)
                 batch_times.append((time.time() - start_step) * 1000)
                 self.train_step += 1
@@ -428,7 +474,9 @@ class MASRTrainer(object):
                     self.train_eta_sec = (sum(train_times) / len(train_times)) * (
                             self.max_step - self.train_step) / 1000
                     eta_str = str(timedelta(seconds=int(self.train_eta_sec)))
-                    self.train_loss = sum(loss_sum) / len(loss_sum)
+                    if len(loss_sum) == 0:
+                        continue
+                    self.train_loss = float(sum(loss_sum) / len(loss_sum))
                     logger.info(f'Train epoch: [{epoch_id}/{self.configs.train_conf.max_epoch}], '
                                 f'batch: [{batch_id}/{len(self.train_loader)}], '
                                 f'loss: {self.train_loss:.5f}, '
@@ -438,34 +486,45 @@ class MASRTrainer(object):
                                 f'ips: {train_speed:.4f} speech/sec, '
                                 f'eta: {eta_str}')
                     # 记录学习率
-                    writer.add_scalar('Train/lr', self.scheduler.get_last_lr()[0], self.train_log_step)
-                    writer.add_scalar('Train/Loss', self.train_loss, self.train_log_step)
+                    _add_scalar_if_finite(writer, 'Train/lr', self.scheduler.get_last_lr()[0], self.train_log_step)
+                    _add_scalar_if_finite(writer, 'Train/Loss', self.train_loss, self.train_log_step)
                     if len(loss_att_sum) > 0:
-                        writer.add_scalar('Train/Loss_att', sum(loss_att_sum) / len(loss_att_sum), self.train_log_step)
+                        _add_scalar_if_finite(writer, 'Train/Loss_att',
+                                              sum(loss_att_sum) / len(loss_att_sum), self.train_log_step)
                     if len(loss_ctc_sum) > 0:
-                        writer.add_scalar('Train/Loss_ctc', sum(loss_ctc_sum) / len(loss_ctc_sum), self.train_log_step)
+                        _add_scalar_if_finite(writer, 'Train/Loss_ctc',
+                                              sum(loss_ctc_sum) / len(loss_ctc_sum), self.train_log_step)
                     if len(loss_nar_ref_sum) > 0:
-                        writer.add_scalar('Train/Loss_nar_ref', sum(loss_nar_ref_sum) / len(loss_nar_ref_sum),
-                                          self.train_log_step)
+                        _add_scalar_if_finite(writer, 'Train/Loss_nar_ref',
+                                              sum(loss_nar_ref_sum) / len(loss_nar_ref_sum), self.train_log_step)
                     if len(loss_nar_error_sum) > 0:
-                        writer.add_scalar('Train/Loss_nar_error', sum(loss_nar_error_sum) / len(loss_nar_error_sum),
-                                          self.train_log_step)
+                        _add_scalar_if_finite(writer, 'Train/Loss_nar_error',
+                                              sum(loss_nar_error_sum) / len(loss_nar_error_sum), self.train_log_step)
                     if len(loss_nar_mlm_sum) > 0:
-                        writer.add_scalar('Train/Loss_nar_mlm', sum(loss_nar_mlm_sum) / len(loss_nar_mlm_sum),
-                                          self.train_log_step)
+                        _add_scalar_if_finite(writer, 'Train/Loss_nar_mlm',
+                                              sum(loss_nar_mlm_sum) / len(loss_nar_mlm_sum),
+                                              self.train_log_step)
+                    if len(nar_mlm_token_count_sum) > 0:
+                        _add_scalar_if_finite(writer, 'Train/NAR_mlm_token_count',
+                                              sum(nar_mlm_token_count_sum) / len(nar_mlm_token_count_sum),
+                                              self.train_log_step)
+                    if len(nar_mlm_token_ratio_sum) > 0:
+                        _add_scalar_if_finite(writer, 'Train/NAR_mlm_token_ratio',
+                                              sum(nar_mlm_token_ratio_sum) / len(nar_mlm_token_ratio_sum),
+                                              self.train_log_step)
                     try:
                         m = self.model.module if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) else self.model
                         embed = getattr(getattr(m, 'encoder', None), 'embed', None)
                         if embed is not None and hasattr(embed, 'get_alpha_value'):
                             alpha_value = embed.get_alpha_value()
                             if alpha_value is not None:
-                                writer.add_scalar('Train/GPSB_alpha', float(alpha_value), self.train_log_step)
-                                writer.add_scalar('Train/GPSB/alpha', float(alpha_value), self.train_log_step)
+                                _add_scalar_if_finite(writer, 'Train/GPSB_alpha', alpha_value, self.train_log_step)
+                                _add_scalar_if_finite(writer, 'Train/GPSB/alpha', alpha_value, self.train_log_step)
                         if embed is not None and hasattr(embed, 'get_alpha_grad'):
                             alpha_grad = embed.get_alpha_grad()
                             if alpha_grad is not None:
-                                writer.add_scalar('Train/GPSB_alpha_grad', float(alpha_grad), self.train_log_step)
-                                writer.add_scalar('Train/GPSB/alpha_grad', float(alpha_grad), self.train_log_step)
+                                _add_scalar_if_finite(writer, 'Train/GPSB_alpha_grad', alpha_grad, self.train_log_step)
+                                _add_scalar_if_finite(writer, 'Train/GPSB/alpha_grad', alpha_grad, self.train_log_step)
                         gpsb_debug_scalars = {
                             'Train/GPSB/gate_mean': 'get_gate_mean',
                             'Train/GPSB/gpsb_out_mean': 'get_gpsb_out_mean',
@@ -477,13 +536,29 @@ class MASRTrainer(object):
                             if embed is not None and hasattr(embed, getter_name):
                                 value = getattr(embed, getter_name)()
                                 if value is not None:
-                                    writer.add_scalar(tag, float(value), self.train_log_step)
+                                    _add_scalar_if_finite(writer, tag, value, self.train_log_step)
+                        wavelet = getattr(m.encoder, 'wavelet_residual', None) if hasattr(m, 'encoder') else None
+                        wavelet_debug_scalars = {
+                            'Train/Wavelet/alpha': 'get_alpha_value',
+                            'Train/Wavelet/gate_mean': 'get_gate_mean',
+                            'Train/Wavelet/residual_l2': 'get_residual_l2',
+                            'Train/Wavelet/delta_mean': 'get_wavelet_delta_mean',
+                            'Train/Wavelet/delta_std': 'get_wavelet_delta_std',
+                            'Train/Wavelet/low_energy': 'get_low_energy',
+                            'Train/Wavelet/high_energy': 'get_high_energy',
+                        }
+                        for tag, getter_name in wavelet_debug_scalars.items():
+                            if wavelet is not None and hasattr(wavelet, getter_name):
+                                value = getattr(wavelet, getter_name)()
+                                if value is not None:
+                                    _add_scalar_if_finite(writer, tag, value, self.train_log_step)
                     except Exception:
                         pass
                     self.train_log_step += 1
                     train_times, reader_times, batch_times, loss_sum = [], [], [], []
                     loss_att_sum, loss_ctc_sum = [], []
                     loss_nar_ref_sum, loss_nar_error_sum, loss_nar_mlm_sum = [], [], []
+                    nar_mlm_token_count_sum, nar_mlm_token_ratio_sum = [], []
                 # 固定步数也要保存一次模型
                 if batch_id % 10000 == 0 and batch_id != 0 and self.local_rank == 0:
                     save_checkpoint(configs=self.configs, model=self.model, optimizer=self.optimizer,

@@ -54,13 +54,16 @@ model_conf:
     if_use_nar: True
     nar_ref_weight: 0.4
     nar_error_weight: 1.0
-    nar_mlm_weight: 0.0
+    nar_mlm_weight: 0.05
     nar_error_mix_prob: 0.4
     nar_args:
-      enable_span_mlm: False
+      enable_span_mlm: True
       span_max_len: 3
       span_max_ratio: 0.15
       span_min_error_tokens: 1
+      span_random_ratio: 0.03
+      mlm_decode_weight: 0.2
+      mlm_detach_input: True
 
 # 数据集参数
 dataset_conf:

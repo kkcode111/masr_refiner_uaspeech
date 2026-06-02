@@ -14,10 +14,10 @@ from masr.model_utils.utils.cmvn import GlobalCMVN
 from masr.model_utils.utils.common import (IGNORE_ID, add_sos_eos, th_accuracy, reverse_pad_list)
 from masr.utils.utils import DictObject
 from mymodel.nar.noncausalrefinerwithfuse import NonCausalRefiner
-__all__ = ["ConformerModel"]
+__all__ = ["ConformerModelA1"]
 
 
-class ConformerModel(torch.nn.Module):
+class ConformerModelA1(torch.nn.Module):
     def __init__(
             self,
             input_size: int,
@@ -38,6 +38,7 @@ class ConformerModel(torch.nn.Module):
             nar_error_weight: float = 0.1,
             nar_mlm_weight: float = 0.03,
             nar_error_mix_prob: float = 0.0,
+            use_right_hidden: bool = True,
             nar_args: DictObject = None):
         assert 0.0 <= ctc_weight <= 1.0, ctc_weight
         super().__init__()
@@ -70,6 +71,7 @@ class ConformerModel(torch.nn.Module):
         self.nar_error_weight = nar_error_weight
         self.nar_mlm_weight = nar_mlm_weight
         self.nar_error_mix_prob = nar_error_mix_prob
+        self.use_right_hidden = use_right_hidden
         if if_use_nar:
             nar_kwargs = {}
             if nar_args is not None:
@@ -99,6 +101,33 @@ class ConformerModel(torch.nn.Module):
             smoothing=lsm_weight,
             normalize_length=length_normalized_loss,
         )
+
+    @staticmethod
+    def _reverse_valid_hidden(hidden: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
+        """Reverse each valid hidden prefix without moving padding to the front."""
+        max_len = hidden.size(1)
+        positions = torch.arange(max_len, device=hidden.device).unsqueeze(0)
+        valid = positions < lengths.unsqueeze(1)
+        reverse_index = (lengths.unsqueeze(1) - 1 - positions).clamp_min(0)
+        reverse_index = reverse_index.unsqueeze(-1).expand(-1, -1, hidden.size(2))
+        reversed_hidden = torch.gather(hidden, 1, reverse_index)
+        return torch.where(valid.unsqueeze(-1), reversed_hidden, torch.zeros_like(reversed_hidden))
+
+    def _average_bidirectional_hidden(
+            self,
+            left_hidden: torch.Tensor,
+            right_hidden: torch.Tensor,
+            lengths: torch.Tensor,
+    ) -> torch.Tensor:
+        """Align right-to-left hidden states with text order and average both directions."""
+        aligned_right_hidden = self._reverse_valid_hidden(right_hidden, lengths)
+        return 0.5 * (left_hidden + aligned_right_hidden)
+
+    def _decoder_reverse_weight(self, reverse_weight: float) -> float:
+        """Run the right decoder for Refiner hidden even when rescoring ignores right logits."""
+        if self.nar is not None and self.use_right_hidden and reverse_weight <= 0.0:
+            return 1.0
+        return reverse_weight
 
     def forward(
             self,
@@ -195,6 +224,7 @@ class ConformerModel(torch.nn.Module):
         r_ys_in_pad, r_ys_out_pad = add_sos_eos(r_ys_pad, self.sos, self.eos, self.ignore_id)
         # 1. Forward decoder
         left_decoder_hidden = None
+        right_decoder_hidden = None
         if self.nar is not None:
             decoder_outputs = self.decoder(
                 encoder_out,
@@ -202,12 +232,13 @@ class ConformerModel(torch.nn.Module):
                 ys_in_pad,
                 ys_in_lens,
                 r_ys_in_pad,
-                self.reverse_weight,
+                self._decoder_reverse_weight(self.reverse_weight),
                 return_hidden=True,
             )
             decoder_out = decoder_outputs[0]
             r_decoder_out = decoder_outputs[1]
             left_decoder_hidden = decoder_outputs[3]
+            right_decoder_hidden = decoder_outputs[4]
         else:
             decoder_out, r_decoder_out, _ = self.decoder(
                 encoder_out, encoder_mask, ys_in_pad, ys_in_lens, r_ys_in_pad, self.reverse_weight)
@@ -223,23 +254,43 @@ class ConformerModel(torch.nn.Module):
             U = ys_pad.size(1)
             predict_logits = decoder_out[:, 0:U, :]
             pred_text = torch.argmax(torch.nn.functional.log_softmax(predict_logits, dim=-1), dim=-1)
-            hidden_text = left_decoder_hidden[:, 0:U, :]
+            left_hidden_text = left_decoder_hidden[:, 0:U, :]
+            if self.use_right_hidden:
+                hidden_text = self._average_bidirectional_hidden(
+                    left_hidden_text,
+                    right_decoder_hidden[:, 0:U, :],
+                    ys_pad_lens,
+                )
+            else:
+                hidden_text = left_hidden_text
             if self.training and self.nar_error_mix_prob > 0.0 and U > 1:
                 corrupt_ys_in_pad = ys_in_pad.clone()
                 valid_for_mix = (ys_pad != self.ignore_id) & (ys_pad > 3)
                 mix_mask = torch.rand(valid_for_mix.shape, device=ys_pad.device) < float(self.nar_error_mix_prob)
                 mix_mask = mix_mask & valid_for_mix
                 corrupt_ys_in_pad[:, 1:] = torch.where(mix_mask, pred_text.detach(), corrupt_ys_in_pad[:, 1:])
+                corrupt_ys_pad = corrupt_ys_in_pad[:, 1:]
+                corrupt_r_ys_pad = reverse_pad_list(corrupt_ys_pad, ys_pad_lens, float(self.ignore_id))
+                corrupt_r_ys_in_pad, _ = add_sos_eos(
+                    corrupt_r_ys_pad, self.sos, self.eos, self.ignore_id)
                 corrupt_outputs = self.decoder(
                     encoder_out,
                     encoder_mask,
                     corrupt_ys_in_pad,
                     ys_in_lens,
-                    r_ys_in_pad,
-                    self.reverse_weight,
+                    corrupt_r_ys_in_pad,
+                    self._decoder_reverse_weight(self.reverse_weight),
                     return_hidden=True,
                 )
-                hidden_text = corrupt_outputs[3][:, 0:U, :]
+                corrupt_left_hidden = corrupt_outputs[3][:, 0:U, :]
+                if self.use_right_hidden:
+                    hidden_text = self._average_bidirectional_hidden(
+                        corrupt_left_hidden,
+                        corrupt_outputs[4][:, 0:U, :],
+                        ys_pad_lens,
+                    )
+                else:
+                    hidden_text = corrupt_left_hidden
             target = ys_pad.clone().to(torch.long)
             target[target == self.ignore_id] = -100
             pred_text[pred_text == self.ignore_id] = -100
@@ -383,12 +434,13 @@ class ConformerModel(torch.nn.Module):
         # 万能解包：不再死板要求 5 个值，通过索引获取，兼容性更强
         decoder_outputs = self.decoder(
             encoder_out_repeat, encoder_mask, hyps, hyps_lens, r_hyps,
-            reverse_weight, return_hidden=True)
+            self._decoder_reverse_weight(reverse_weight), return_hidden=True)
         
         decoder_out = decoder_outputs[0]
         r_decoder_out = decoder_outputs[1]
         # olens = decoder_outputs[2]
         left_hidden = decoder_outputs[3] # 无论 4 个还是 5 个值，第 4 个始终是 left_hidden
+        right_hidden = decoder_outputs[4]
 
         # 计算 Refiner 输出
         refiner_out = torch.zeros(num_hyps, hyps.size(1) - 1, self.vocab_size, device=decoder_out.device)
@@ -396,9 +448,17 @@ class ConformerModel(torch.nn.Module):
             # 去掉 <sos> 位置，对齐文本长度
             # left_hidden: [B, L+1, D] -> [B, L, D]
             U = hyps.size(1) - 1
-            hidden_text = left_hidden[:, 0:U, :]
+            left_hidden_text = left_hidden[:, 0:U, :]
             # 为了调用 nar.decode，需要准备真实的 hyps_lens (去掉 sos)
             real_hyps_lens = hyps_lens - 1
+            if self.use_right_hidden:
+                hidden_text = self._average_bidirectional_hidden(
+                    left_hidden_text,
+                    right_hidden[:, 0:U, :],
+                    real_hyps_lens,
+                )
+            else:
+                hidden_text = left_hidden_text
             
             # 由于 get_decoder_out 是针对 beam_size 的，这里 encoder_out 已经是 repeat 后的了
             # 我们需要把原始的 encoder_mask 传给 Refiner

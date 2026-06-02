@@ -17,6 +17,7 @@ from masr.model_utils.conformer.subsampling import Conv2dSubsampling8
 from masr.model_utils.conformer.subsampling import LinearNoSubsampling
 from masr.model_utils.conformer.subsampling import ParallelSpectralBranching4
 from masr.model_utils.conformer.subsampling import GlobalParallelSpectralBranching
+from masr.model_utils.conformer.wavelet import TemporalHaarWaveletResidual
 from masr.model_utils.utils.common import get_activation
 from masr.model_utils.utils.mask import add_optional_chunk_mask, make_pad_mask
 
@@ -43,7 +44,7 @@ class ConformerEncoder(nn.Module):
             concat_after: bool = False,
             static_chunk_size: int = 0,
             use_dynamic_chunk: bool = False,
-            global_cmvn: torch.nn.Module = None,
+            global_cmvn: Optional[torch.nn.Module] = None,
             use_dynamic_left_chunk: bool = False,
             macaron_style: bool = True,
             activation_type: str = "swish",
@@ -57,7 +58,13 @@ class ConformerEncoder(nn.Module):
             gpsb_use_fuse_norm: bool = False,
             gpsb_gate_init: float = -2.0,
             gpsb_alpha_warmup_steps: int = 0,
-            gpsb_alpha_max: float = 1.0
+            gpsb_alpha_max: float = 1.0,
+            use_wavelet_residual: bool = False,
+            wavelet_insert_layer: int = 0,
+            wavelet_alpha_init: float = -4.0,
+            wavelet_gate_init: float = -2.0,
+            wavelet_alpha_max: float = 1.0,
+            wavelet_dropout: float = 0.1
     ):
         """Construct ConformerEncoder
 
@@ -155,6 +162,17 @@ class ConformerEncoder(nn.Module):
         self.static_chunk_size = static_chunk_size
         self.use_dynamic_chunk = use_dynamic_chunk
         self.use_dynamic_left_chunk = use_dynamic_left_chunk
+        self.use_wavelet_residual = use_wavelet_residual
+        self.wavelet_insert_layer = int(wavelet_insert_layer)
+        if self.use_wavelet_residual:
+            self.wavelet_residual = TemporalHaarWaveletResidual(
+                size=output_size,
+                alpha_init=wavelet_alpha_init,
+                gate_init=wavelet_gate_init,
+                alpha_max=wavelet_alpha_max,
+                dropout_rate=wavelet_dropout)
+        else:
+            self.wavelet_residual = None
 
         activation = get_activation(activation_type)
 
@@ -182,6 +200,11 @@ class ConformerEncoder(nn.Module):
                 normalize_before=normalize_before,
                 concat_after=concat_after) for _ in range(num_blocks)
         ])
+
+    def _maybe_apply_wavelet(self, xs: torch.Tensor, masks: torch.Tensor, insert_layer: int) -> torch.Tensor:
+        if self.wavelet_residual is not None and self.wavelet_insert_layer == insert_layer:
+            xs = self.wavelet_residual(xs, masks)
+        return xs
 
     def output_size(self) -> int:
         return self._output_size
@@ -213,6 +236,7 @@ class ConformerEncoder(nn.Module):
         if self.global_cmvn is not None:
             xs = self.global_cmvn(xs)
         xs, pos_emb, masks = self.embed(xs, masks)
+        xs = self._maybe_apply_wavelet(xs, masks, -1)
         mask_pad = masks  # (B, 1, T/subsample_rate)
         chunk_masks = add_optional_chunk_mask(xs, masks,
                                               self.use_dynamic_chunk,
@@ -220,8 +244,9 @@ class ConformerEncoder(nn.Module):
                                               decoding_chunk_size,
                                               self.static_chunk_size,
                                               num_decoding_left_chunks)
-        for layer in self.encoders:
+        for layer_idx, layer in enumerate(self.encoders):
             xs, chunk_masks, _, _ = layer(xs, chunk_masks, pos_emb, mask_pad)
+            xs = self._maybe_apply_wavelet(xs, masks, layer_idx)
         if self.normalize_before:
             xs = self.after_norm(xs)
         # Here we assume the mask is not changed in encoder layers, so just
@@ -269,7 +294,8 @@ class ConformerEncoder(nn.Module):
         if self.global_cmvn is not None:
             xs = self.global_cmvn(xs)
         # NOTE(xcsong): Before embed, shape(xs) is (b=1, time, mel-dim)
-        xs, pos_emb, _ = self.embed(xs, tmp_masks, offset)
+        xs, pos_emb, masks = self.embed(xs, tmp_masks, offset)
+        xs = self._maybe_apply_wavelet(xs, masks, -1)
         # NOTE(xcsong): After  embed, shape(xs) is (b=1, chunk_size, hidden-dim)
         elayers, cache_t1 = att_cache.size(0), att_cache.size(2)
         chunk_size = xs.size(1)
@@ -292,6 +318,7 @@ class ConformerEncoder(nn.Module):
                 xs, att_mask, pos_emb,
                 att_cache=att_cache[i:i + 1] if elayers > 0 else att_cache,
                 cnn_cache=cnn_cache[i] if cnn_cache.size(0) > 0 else cnn_cache)
+            xs = self._maybe_apply_wavelet(xs, masks, i)
             r_att_cache.append(new_att_cache[:, :, next_cache_start:, :])
             r_cnn_cache.append(new_cnn_cache)
         if self.normalize_before:

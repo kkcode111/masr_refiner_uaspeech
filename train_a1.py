@@ -7,7 +7,7 @@ from masr.utils.utils import add_arguments, print_arguments
 
 parser = argparse.ArgumentParser(description=__doc__)
 add_arg = functools.partial(add_arguments, argparser=parser)
-add_arg('configs',              str,    'configs/conformer_wavelet_b1.yml', 'configs file')
+add_arg('configs',              str,    'configs/conformer_a1.yml',     'configs file')
 add_arg('data_augment_configs', str,    'configs/augmentation.yml',    'data augmentation configs file')
 add_arg('data_profile',         str,    'uaspeech_only',               'dataset profile: uaspeech_only, base, speed_augmented, or config',
         choices=['uaspeech_only', 'base', 'speed_augmented', 'config'])
@@ -15,8 +15,8 @@ add_arg('use_online_augmentation', bool, False,                        'apply au
 add_arg("local_rank",           int,    0,                             'local GPU rank for distributed training')
 add_arg("use_gpu",              bool,   True,                          'use GPU for training')
 add_arg('metrics_type',         str,    'wer',                         'evaluation metric')
-add_arg('save_model_path',      str,    'uaspeechmodel/wavelet_b1/',   'model save path')
-add_arg('log_dir',              str,    'uaspeechmodel/logs/wavelet_b1/', 'VisualDL log path')
+add_arg('save_model_path',      str,    'uaspeechmodel/refiner_a1/',   'model save path')
+add_arg('log_dir',              str,    'uaspeechmodel/logs/refiner_a1/', 'VisualDL log path')
 add_arg('resume_model',         str,    None,                          'checkpoint path for resume training')
 add_arg('pretrained_model',     str,    'pretrain_models/refiner_pretrain_v1/ConformerModel_fbank/best_model', 'pretrained model path')
 add_arg('overwrites',           str,    'train_conf.max_epoch=60',     'config overwrites, separated by comma')
